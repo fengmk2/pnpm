@@ -1,5 +1,41 @@
 # @pnpm/types
 
+## 1101.3.2
+
+### Patch Changes
+
+- 681b593: pnpm can now use different auth tokens for different package scopes, even when those scopes use the same registry URL.
+
+  Previously, auth was selected only by registry URL. If `@org-a` and `@org-b` both used `https://npm.pkg.github.com/`, they had to share the same token. This caused problems for registries that issue tokens per organization or per scope.
+
+  Configure a scope-specific token by adding the package scope after the registry URL in the auth key:
+
+  ```ini
+  @org-a:registry=https://npm.pkg.github.com/
+  @org-b:registry=https://npm.pkg.github.com/
+
+  //npm.pkg.github.com/:@org-a:_authToken=${ORG_A_TOKEN}
+  //npm.pkg.github.com/:@org-b:_authToken=${ORG_B_TOKEN}
+
+  //npm.pkg.github.com/:_authToken=${FALLBACK_TOKEN}
+  ```
+
+  `pnpm login --registry=https://npm.pkg.github.com --scope=@org-a` writes the token to the same scope-specific auth key.
+
+  When installing or publishing `@org-a/*`, pnpm uses `ORG_A_TOKEN`. For `@org-b/*`, pnpm uses `ORG_B_TOKEN`. Packages without a matching scope continue to use the registry-wide fallback token.
+
+## 1101.3.1
+
+### Patch Changes
+
+- bf1b731: Require trusted package identity before package-name `allowBuilds` entries can approve lifecycle scripts for git, git-hosted tarball, direct tarball, and local directory artifacts. To approve one of those artifacts explicitly, use its peer-suffix-free lockfile depPath as the `allowBuilds` key. Lockfile verification now rejects lockfiles where a registry-style dependency path (`name@semver`) is backed by a git, directory, or git-hosted tarball resolution (`ERR_PNPM_RESOLUTION_SHAPE_MISMATCH`), so the dependency path is a reliable artifact identity by the time scripts can run.
+
+## 1101.3.0
+
+### Minor Changes
+
+- a017bf3: Renamed the experimental `agent` setting to `pnprServer` so the pnpm CLI matches the same setting name pacquet uses for offloading resolution to a [pnpr](https://github.com/pnpm/pnpm/tree/main/pnpr) server. Point pnpm at a pnpr server with `pnprServer: <url>` in `pnpm-workspace.yaml` (or `--pnpr-server <url>`); the previous `agent` / `--agent` name no longer works. The client package was likewise renamed from `@pnpm/agent.client` to `@pnpm/pnpr.client`.
+
 ## 1101.2.0
 
 ### Minor Changes

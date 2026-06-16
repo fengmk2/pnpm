@@ -1,4 +1,4 @@
-use super::{AuthHeaders, base64_encode, nerf_dart};
+use super::{AuthHeaders, DEFAULT_REGISTRY_SCOPE, base64_encode, nerf_dart};
 use pretty_assertions::assert_eq;
 
 fn build(entries: &[(&str, &str)]) -> AuthHeaders {
@@ -134,6 +134,123 @@ fn registry_with_pathname_matches_metadata_and_tarballs() {
 }
 
 #[test]
+fn package_scope_auth_wins_over_registry_auth() {
+    let headers = build(&[
+        ("//npm.pkg.github.com/", "Bearer registry-token"),
+        ("//npm.pkg.github.com/:@orgA", "Bearer org-a-token"),
+        ("//npm.pkg.github.com/:@orgB", "Bearer org-b-token"),
+    ]);
+    assert_eq!(
+        headers.for_url_with_package("https://npm.pkg.github.com/", Some("@orgA/pkg")).as_deref(),
+        Some("Bearer org-a-token"),
+    );
+    assert_eq!(
+        headers.for_url_with_package("https://npm.pkg.github.com/", Some("@orgB/pkg")).as_deref(),
+        Some("Bearer org-b-token"),
+    );
+    assert_eq!(
+        headers.for_url_with_package("https://npm.pkg.github.com/", Some("@orgC/pkg")).as_deref(),
+        Some("Bearer registry-token"),
+    );
+    assert_eq!(
+        headers.for_url_with_package("https://npm.pkg.github.com/", Some("pkg")).as_deref(),
+        Some("Bearer registry-token"),
+    );
+    assert_eq!(
+        headers
+            .for_url_with_package("https://npm.pkg.github.com/download/pkg.tgz", Some("@orgA/pkg"))
+            .as_deref(),
+        Some("Bearer org-a-token"),
+    );
+}
+
+#[test]
+fn slash_package_scope_auth_wins_over_registry_auth() {
+    let headers = build(&[
+        ("//npm.pkg.github.com/", "Bearer registry-token"),
+        ("//npm.pkg.github.com/@orgA", "Bearer org-a-token"),
+        ("//npm.pkg.github.com/@orgB/", "Bearer org-b-token"),
+    ]);
+    assert_eq!(
+        headers.for_url_with_package("https://npm.pkg.github.com/", Some("@orgA/pkg")).as_deref(),
+        Some("Bearer org-a-token"),
+    );
+    assert_eq!(
+        headers.for_url_with_package("https://npm.pkg.github.com/", Some("@orgB/pkg")).as_deref(),
+        Some("Bearer org-b-token"),
+    );
+}
+
+#[test]
+fn package_scope_auth_keeps_registry_path() {
+    let headers = build(&[
+        ("//reg.com/npm/", "Bearer registry-token"),
+        ("//reg.com/npm/:@orgA", "Bearer org-a-token"),
+    ]);
+    assert_eq!(
+        headers.for_url_with_package("https://reg.com/npm/", Some("@orgA/pkg")).as_deref(),
+        Some("Bearer org-a-token"),
+    );
+    assert_eq!(
+        headers
+            .for_url_with_package("https://reg.com/npm/pkg/-/pkg-1.0.0.tgz", Some("@orgA/pkg"))
+            .as_deref(),
+        Some("Bearer org-a-token"),
+    );
+    assert_eq!(
+        headers.for_url_with_package("https://reg.com/npm/", Some("@orgB/pkg")).as_deref(),
+        Some("Bearer registry-token"),
+    );
+}
+
+#[test]
+fn entries_round_trip_package_scope_auth() {
+    let headers = build(&[
+        ("//npm.pkg.github.com/", "Bearer registry-token"),
+        ("//npm.pkg.github.com/:@orgA", "Bearer org-a-token"),
+        ("//reg.com/npm/:@orgA", "Bearer org-a-path-token"),
+    ]);
+    let by_scope = headers.to_by_scope();
+    assert_eq!(
+        by_scope
+            .get("//npm.pkg.github.com/")
+            .and_then(|scope_headers| scope_headers.get(DEFAULT_REGISTRY_SCOPE))
+            .map(String::as_str),
+        Some("Bearer registry-token"),
+    );
+    assert_eq!(
+        by_scope
+            .get("//npm.pkg.github.com/")
+            .and_then(|scope_headers| scope_headers.get("@orgA"))
+            .map(String::as_str),
+        Some("Bearer org-a-token"),
+    );
+    assert_eq!(
+        by_scope
+            .get("//reg.com/npm/")
+            .and_then(|scope_headers| scope_headers.get("@orgA"))
+            .map(String::as_str),
+        Some("Bearer org-a-path-token"),
+    );
+
+    let round_tripped = AuthHeaders::from_by_scope(by_scope);
+    assert_eq!(
+        round_tripped
+            .for_url_with_package("https://reg.com/npm/pkg/-/pkg-1.0.0.tgz", Some("@orgA/pkg"))
+            .as_deref(),
+        Some("Bearer org-a-path-token"),
+    );
+}
+
+#[test]
+fn basic_auth_in_url_wins_over_package_scope_auth() {
+    let headers = build(&[("//reg.com/:@orgA", "Bearer org-a-token")]);
+    let header =
+        headers.for_url_with_package("https://user:secret@reg.com/", Some("@orgA/pkg")).unwrap();
+    assert_eq!(header, format!("Basic {}", base64_encode("user:secret")));
+}
+
+#[test]
 fn default_registry_creds_apply_to_npmjs_when_unspecified() {
     let headers = AuthHeaders::from_creds_map(
         [(String::new(), "Bearer default-token".to_owned())],
@@ -185,7 +302,7 @@ fn returns_none_for_unmatched_url_in_empty_map() {
 /// `//registry.npmjs.org/:_authToken=B` (per-URI for the default
 /// registry), upstream guarantees the *default* (A) wins on the
 /// default registry. Without the two-phase build in `from_creds_map`,
-/// pacquet's HashMap iteration would let either value win
+/// pacquet's `HashMap` iteration would let either value win
 /// non-deterministically.
 #[test]
 fn default_creds_win_over_per_uri_on_default_registry() {

@@ -17,8 +17,20 @@
 
 use crate::{Lockfile, ProjectSnapshot};
 use derive_more::{Display, Error};
+use pacquet_catalogs_types::Catalogs;
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+#[derive(Clone, Copy)]
+pub struct LockfileSettingsCheck<'a> {
+    pub catalogs: &'a Catalogs,
+    pub overrides: Option<&'a HashMap<String, String>>,
+    pub package_extensions_checksum: Option<&'a str>,
+    pub ignored_optional_dependencies: Option<&'a [String]>,
+    pub patched_dependencies: Option<&'a BTreeMap<String, String>>,
+    pub inject_workspace_packages: bool,
+    pub peers_suffix_max_length: u64,
+}
 
 /// Why an importer's lockfile entry doesn't satisfy the on-disk
 /// `package.json`. Mirrors the discriminated cases upstream's
@@ -29,6 +41,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 #[derive(Debug, Display, Error, PartialEq)]
 #[non_exhaustive]
 pub enum StalenessReason {
+    /// A catalog entry recorded in the lockfile's `catalogs:` snapshot
+    /// no longer matches the current workspace catalog config. Mirrors
+    /// upstream's `getOutdatedLockfileSetting` first branch, which
+    /// returns `'catalogs'` when `allCatalogsAreUpToDate` fails.
+    #[display("`catalogs` in the lockfile don't match the current config")]
+    CatalogsChanged { lockfile: Option<crate::CatalogSnapshots>, config: Catalogs },
+
     /// The lockfile has no `importers["."]` (or whatever id) entry,
     /// so we can't even start the comparison. Mirrors upstream's
     /// "no importer" reason at
@@ -136,6 +155,25 @@ pub enum StalenessReason {
         "`packageExtensionsChecksum` in the lockfile ({lockfile:?}) doesn't match the current config ({config:?})"
     )]
     PackageExtensionsChecksumChanged { lockfile: Option<String>, config: Option<String> },
+
+    /// The lockfile's `patchedDependencies` (key → patch-file hash)
+    /// doesn't match the map the current install would write. Mirrors
+    /// upstream's
+    /// [`getOutdatedLockfileSetting.ts:61-63`](https://github.com/pnpm/pnpm/blob/39101f5e37/lockfile/settings-checker/src/getOutdatedLockfileSetting.ts#L61-L63):
+    /// upstream returns `'patchedDependencies'` and `needsFullResolution`
+    /// flips on. Pacquet has no resolver, so the matching action is to
+    /// surface this as `OutdatedLockfile`. A changed patch file changes
+    /// its hash here, which is what catches an edited patch whose
+    /// `(patch_hash=...)` depPath suffix would otherwise go stale. Both
+    /// values are normalized into a `BTreeMap` so the comparison is
+    /// order-insensitive (matching upstream's Ramda `equals`).
+    #[display(
+        "`patchedDependencies` in the lockfile ({lockfile:?}) doesn't match the current config ({config:?})"
+    )]
+    PatchedDependenciesChanged {
+        lockfile: BTreeMap<String, String>,
+        config: BTreeMap<String, String>,
+    },
 }
 
 /// Per-bucket diff against the manifest's flat union of deps.
@@ -206,6 +244,7 @@ fn noun_verb_for(n: usize) -> (&'static str, &'static str) {
 /// `true` when the flat-record diff is empty in all three buckets —
 /// the manifest and the lockfile agree on the set of specifiers.
 impl SpecDiff {
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.added.is_empty() && self.removed.is_empty() && self.modified.is_empty()
     }
@@ -213,10 +252,11 @@ impl SpecDiff {
 
 /// Verify that lockfile-level settings the install pipeline reads
 /// from `pnpm-workspace.yaml` haven't drifted since the lockfile
-/// was written. Today this covers `overrides` and
-/// `ignoredOptionalDependencies` (umbrella [#434] slice 7); the
-/// variants below will grow as more upstream settings land
-/// (`catalogs`, `patchedDependencies`, `pnpmfileChecksum`, etc.).
+/// was written. Today this covers `catalogs`, `overrides`,
+/// `packageExtensionsChecksum`, `ignoredOptionalDependencies`,
+/// `patchedDependencies`, and the relevant `settings.*` keys (umbrella
+/// [#434] slice 7); the variants below will grow as more upstream
+/// settings land (`pnpmfileChecksum`, etc.).
 ///
 /// Mirrors upstream's
 /// [`getOutdatedLockfileSetting`](https://github.com/pnpm/pnpm/blob/606f53e78f/lockfile/settings-checker/src/getOutdatedLockfileSetting.ts).
@@ -233,9 +273,47 @@ pub fn check_lockfile_settings(
     overrides: Option<&HashMap<String, String>>,
     package_extensions_checksum: Option<&str>,
     ignored_optional_dependencies: Option<&[String]>,
+    patched_dependencies: Option<&BTreeMap<String, String>>,
     inject_workspace_packages: bool,
     peers_suffix_max_length: u64,
 ) -> Result<(), StalenessReason> {
+    check_lockfile_settings_with_catalogs(
+        lockfile,
+        LockfileSettingsCheck {
+            catalogs: &Catalogs::new(),
+            overrides,
+            package_extensions_checksum,
+            ignored_optional_dependencies,
+            patched_dependencies,
+            inject_workspace_packages,
+            peers_suffix_max_length,
+        },
+    )
+}
+
+/// Catalog-aware variant of [`check_lockfile_settings`] used by install paths
+/// that have already loaded `pnpm-workspace.yaml`.
+pub fn check_lockfile_settings_with_catalogs(
+    lockfile: &Lockfile,
+    check: LockfileSettingsCheck<'_>,
+) -> Result<(), StalenessReason> {
+    let LockfileSettingsCheck {
+        catalogs,
+        overrides,
+        package_extensions_checksum,
+        ignored_optional_dependencies,
+        patched_dependencies,
+        inject_workspace_packages,
+        peers_suffix_max_length,
+    } = check;
+
+    if !all_catalogs_are_up_to_date(catalogs, lockfile.catalogs.as_ref()) {
+        return Err(StalenessReason::CatalogsChanged {
+            lockfile: lockfile.catalogs.clone(),
+            config: catalogs.clone(),
+        });
+    }
+
     // Upstream checks `overrides` before `ignoredOptionalDependencies`,
     // so an install that changed both surfaces the overrides drift
     // first — preserving that for parity with pnpm error reports.
@@ -284,6 +362,24 @@ pub fn check_lockfile_settings(
         });
     }
 
+    // Upstream checks `patchedDependencies` right after
+    // `ignoredOptionalDependencies` via
+    // `!equals(lockfile.patchedDependencies ?? {}, patchedDependencies ?? {})`.
+    // Both maps are already key-sorted (`BTreeMap`), so `==` reproduces
+    // the order-insensitive `equals`; absent on either side normalizes
+    // to an empty map. A changed patch file changes its hash here, so
+    // this is what invalidates a lockfile whose `(patch_hash=...)` depPath
+    // suffixes would otherwise go stale.
+    let empty_patches: BTreeMap<String, String> = BTreeMap::new();
+    let lockfile_patches = lockfile.patched_dependencies.as_ref().unwrap_or(&empty_patches);
+    let config_patches = patched_dependencies.unwrap_or(&empty_patches);
+    if lockfile_patches != config_patches {
+        return Err(StalenessReason::PatchedDependenciesChanged {
+            lockfile: lockfile_patches.clone(),
+            config: config_patches.clone(),
+        });
+    }
+
     // `Boolean(lockfile.settings?.injectWorkspacePackages) !==
     // Boolean(injectWorkspacePackages)` at upstream's
     // [`getOutdatedLockfileSetting.ts:80-82`](https://github.com/pnpm/pnpm/blob/39101f5e37/lockfile/settings-checker/src/getOutdatedLockfileSetting.ts#L80-L82).
@@ -319,6 +415,18 @@ pub fn check_lockfile_settings(
     Ok(())
 }
 
+fn all_catalogs_are_up_to_date(
+    catalogs_config: &Catalogs,
+    snapshot: Option<&crate::CatalogSnapshots>,
+) -> bool {
+    snapshot.iter().flat_map(|catalogs| catalogs.iter()).all(|(catalog_name, catalog)| {
+        catalog.iter().all(|(alias, entry)| {
+            catalogs_config.get(catalog_name).and_then(|catalog| catalog.get(alias))
+                == Some(&entry.specifier)
+        })
+    })
+}
+
 /// Verify the on-disk `package.json` is still satisfied by the
 /// lockfile's importer entry for the same project. Returns `Ok(())`
 /// when the lockfile is up-to-date; returns `Err(StalenessReason)`
@@ -340,11 +448,11 @@ pub fn check_lockfile_settings(
 ///
 /// Mirrors upstream's
 /// [`satisfiesPackageManifest`](https://github.com/pnpm/pnpm/blob/94240bc046/lockfile/verification/src/satisfiesPackageManifest.ts).
-/// Scoped to what pacquet supports today: no catalogs (#?), no
-/// `auto-install-peers` pre-pass (pacquet has no separate
-/// auto-install-peers mode), no `excludeLinksFromLockfile` (`link:`
-/// resolutions aren't supported yet — [#431] territory), and no
-/// version-range-satisfies check (covered in pnpm's
+/// Scoped to what pacquet supports today: no `auto-install-peers`
+/// pre-pass (pacquet has no separate auto-install-peers mode), no
+/// `excludeLinksFromLockfile` (`link:` resolutions aren't supported
+/// yet — [#431] territory), and no version-range-satisfies check
+/// (covered in pnpm's
 /// `localTarballDepsAreUpToDate` for file: / tarball deps; out of
 /// scope here).
 ///
@@ -396,8 +504,10 @@ pub fn satisfies_package_manifest(
     let importer_meta = importer.dependencies_meta.as_ref();
     if !dependencies_meta_equal(importer_meta, manifest_meta) {
         return Err(StalenessReason::DependenciesMetaMismatch {
-            lockfile: importer_meta.map_or_else(|| "{}".to_string(), |v| v.to_string()),
-            manifest: manifest_meta.map_or_else(|| "{}".to_string(), |v| v.to_string()),
+            lockfile: importer_meta
+                .map_or_else(|| "{}".to_string(), std::string::ToString::to_string),
+            manifest: manifest_meta
+                .map_or_else(|| "{}".to_string(), std::string::ToString::to_string),
         });
     }
 

@@ -59,6 +59,10 @@ const ACME_PRIVATE_BODY: &str = r#"{
     }
 }"#;
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "nested test helper called many times; owned arg keeps the call sites and assert ergonomics simple"
+)]
 fn build_resolver(
     user_named_registries: HashMap<String, String>,
 ) -> (NamedRegistryResolver<InMemoryPackageMetaCache>, TempDir) {
@@ -78,6 +82,7 @@ fn build_resolver(
         prefer_offline: false,
         ignore_missing_time_field: false,
         full_metadata: false,
+        filter_metadata: false,
         retry_opts: RetryOpts::default(),
     };
     (resolver, cache_dir)

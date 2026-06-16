@@ -1,5 +1,6 @@
 use crate::{capabilities::FsReadHead, path_util::lexical_normalize};
 use std::{
+    fmt::Write as _,
     io,
     path::{Path, PathBuf},
 };
@@ -7,7 +8,7 @@ use std::{
 /// Detected runtime for a target script.
 ///
 /// Mirrors the return shape of `searchScriptRuntime` in
-/// <https://github.com/pnpm/cmd-shim/blob/0d79ca9534/src/index.ts>.
+/// <https://github.com/pnpm/cmd-shim/blob/e8560a8405/src/index.ts>.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScriptRuntime {
     /// The interpreter to invoke. `None` means "exec the file directly".
@@ -53,7 +54,8 @@ pub fn search_script_runtime<Sys: FsReadHead>(path: &Path) -> io::Result<Option<
     }
 
     if let Some(prog) = extension_program(extension) {
-        return Ok(Some(ScriptRuntime { prog: Some(prog.to_string()), args: String::new() }));
+        let args = if prog == "cmd" { "/C" } else { "" };
+        return Ok(Some(ScriptRuntime { prog: Some(prog.to_string()), args: args.to_string() }));
     }
 
     Ok(None)
@@ -107,6 +109,7 @@ pub fn read_head_filled<Sys: FsReadHead>(path: &Path, buf: &mut [u8]) -> io::Res
 /// wrong runtime for files that just happen to mention `#!` after some
 /// whitespace. The first line is taken exactly as-is (`#!` is matched
 /// at column 0 of that line via `strip_prefix` in `parse_shebang`).
+#[must_use]
 pub fn parse_shebang_from_bytes(bytes: &[u8]) -> Option<ScriptRuntime> {
     let head = String::from_utf8_lossy(bytes);
     let first_line = head.split('\n').next().unwrap_or("").trim_end_matches('\r');
@@ -162,17 +165,19 @@ fn strip_env_prefix(input: &str) -> (&str, bool) {
 ///
 /// The shim is a pure `/bin/sh` script that:
 ///
-/// 1. Resolves `basedir` to its own directory (with a `cygpath` fixup for
-///    MSYS-style POSIX shells on Windows).
-/// 2. If the runtime program is colocated at `$basedir/<prog>` (a rare case,
-///    only true when the runtime was bundled alongside the shim), prefer that
-///    binary; otherwise fall through to the system PATH.
+/// 1. Resolves `basedir` to its own directory and keeps `basedir_win` for
+///    native Windows binaries reached from Cygwin/MSYS/WSL2.
+/// 2. If the runtime program is colocated at `$basedir/<prog>.exe` or
+///    `$basedir/<prog>` (a rare case, only true when the runtime was bundled
+///    alongside the shim), prefer that binary; otherwise fall through to the
+///    system PATH.
 /// 3. Forwards `"$@"` to the resolved interpreter, with the target script as
 ///    the first positional argument.
 ///
 /// When [`search_script_runtime`] returned `None` (no shebang, unknown
 /// extension), the shim execs the target directly via the second branch
 /// upstream uses for that case.
+#[must_use]
 pub fn generate_sh_shim(
     target_path: &Path,
     shim_path: &Path,
@@ -186,27 +191,63 @@ pub fn generate_sh_shim(
     } else {
         format!("\"$basedir/{sh_target}\"")
     };
+    let quoted_target_win = if Path::new(&sh_target).is_absolute() {
+        format!("\"{sh_target}\"")
+    } else {
+        format!("\"$basedir_win/{sh_target}\"")
+    };
 
     match runtime {
         Some(ScriptRuntime { prog: Some(prog), args }) => {
-            // `sh_long_prog` is the `"$basedir/<prog>"` form upstream uses.
-            // It always carries the leading `$basedir/` and quotes; never
-            // just the program name on its own.
-            let sh_long_prog = format!("\"$basedir/{prog}\"");
-            sh.push_str(&format!(
-                "if [ -x {sh_long_prog} ]; then\n  exec {sh_long_prog} {args} {quoted_target} \"$@\"\nelse\n  exec {prog} {args} {quoted_target} \"$@\"\nfi\n",
-            ));
+            let prog_base = strip_exe_suffix(prog).unwrap_or(prog);
+            let prog_has_exe = prog_base.len() != prog.len();
+            let prog_exe = if prog_has_exe { prog.clone() } else { format!("{prog}.exe") };
+            let sh_long_prog_exe = format!("\"$basedir/{prog_exe}\"");
+            let exec_block = |exec_args: &str| {
+                let mut block = String::new();
+                if prog_has_exe {
+                    writeln!(
+                        block,
+                        "if [ -x {sh_long_prog_exe} ]; then\n  exec {sh_long_prog_exe} {exec_args} {quoted_target_win} \"$@\"\nelse\n  exec {prog_exe} {exec_args} {quoted_target_win} \"$@\"\nfi",
+                    )
+                    .unwrap();
+                } else {
+                    let sh_long_prog = format!("\"$basedir/{prog}\"");
+                    writeln!(
+                        block,
+                        "if [ -n \"$exe\" ] && [ -x {sh_long_prog_exe} ]; then\n  exec {sh_long_prog_exe} {exec_args} {quoted_target_win} \"$@\"\nelif [ -x {sh_long_prog} ]; then\n  exec {sh_long_prog} {exec_args} {quoted_target} \"$@\"\nelif command -v {prog} >/dev/null 2>&1; then\n  exec {prog} {exec_args} {quoted_target} \"$@\"\nelif [ -n \"$exe\" ] && command -v {prog_exe} >/dev/null 2>&1; then\n  exec {prog_exe} {exec_args} {quoted_target_win} \"$@\"\nelse\n  exec {prog} {exec_args} {quoted_target} \"$@\"\nfi",
+                    )
+                    .unwrap();
+                }
+                block
+            };
+
+            let msys_args = prog_base
+                .eq_ignore_ascii_case("cmd")
+                .then(|| escape_msys_cmd_switches(args))
+                .filter(|escaped_args| escaped_args != args);
+            if let Some(msys_args) = msys_args {
+                writeln!(
+                    sh,
+                    "if [ -n \"$msys\" ]; then\n{}else\n{}fi",
+                    indent_shell_block(&exec_block(&msys_args)),
+                    indent_shell_block(&exec_block(args)),
+                )
+                .unwrap();
+            } else {
+                sh.push_str(&exec_block(args));
+            }
         }
         // No runtime detected, so exec the target directly. Upstream still
         // emits `exit $?` on this branch for parity with non-execve POSIX
         // shells.
         runtime_opt => {
-            let args = runtime_opt.map(|runtime| runtime.args.as_str()).unwrap_or("");
-            sh.push_str(&format!("{quoted_target} {args} \"$@\"\nexit $?\n"));
+            let args = runtime_opt.map_or("", |runtime| runtime.args.as_str());
+            writeln!(sh, "{quoted_target} {args} \"$@\"\nexit $?").unwrap();
         }
     }
 
-    sh.push_str(&format!("# {}\n", shim_target_marker(target_path)));
+    writeln!(sh, "# {}", shim_target_marker(target_path)).unwrap();
     sh
 }
 
@@ -217,6 +258,7 @@ pub fn generate_sh_shim(
 ///
 /// CRLF line endings are part of the on-disk contract for `.cmd` files
 /// on Windows, so the template uses literal `\r\n`.
+#[must_use]
 pub fn generate_cmd_shim(
     target_path: &Path,
     shim_path: &Path,
@@ -234,14 +276,16 @@ pub fn generate_cmd_shim(
     match runtime {
         Some(ScriptRuntime { prog: Some(prog), args }) => {
             let long_prog = format!("\"%~dp0\\{prog}.exe\"");
-            cmd.push_str(&format!(
-                "@IF EXIST {long_prog} (\r\n  {long_prog} {args} {quoted_target} %*\r\n) ELSE (\r\n  @SET PATHEXT=%PATHEXT:;.JS;=;%\r\n  {prog} {args} {quoted_target} %*\r\n)\r\n",
-            ));
+            writeln!(
+                cmd,
+                "@IF EXIST {long_prog} (\r\n  {long_prog} {args} {quoted_target} %*\r\n) ELSE (\r\n  @SET PATHEXT=%PATHEXT:;.JS;=;%\r\n  {prog} {args} {quoted_target} %*\r\n)\r",
+            )
+            .unwrap();
         }
         runtime_opt => {
-            let args = runtime_opt.map(|runtime| runtime.args.as_str()).unwrap_or("");
+            let args = runtime_opt.map_or("", |runtime| runtime.args.as_str());
             // No runtime detected, so exec the target directly.
-            cmd.push_str(&format!("@{quoted_target} {args} %*\r\n"));
+            writeln!(cmd, "@{quoted_target} {args} %*\r").unwrap();
         }
     }
 
@@ -253,6 +297,7 @@ pub fn generate_cmd_shim(
 /// minus the `nodePath`/`prependToPath`/`nodeExecPath`/`progArgs`
 /// branches we don't use. The shim self-detects Windows vs. POSIX-ish
 /// pwsh and adjusts the executable suffix accordingly.
+#[must_use]
 pub fn generate_pwsh_shim(
     target_path: &Path,
     shim_path: &Path,
@@ -294,7 +339,7 @@ pub fn generate_pwsh_shim(
             writeln!(pwsh, "exit $ret").unwrap();
         }
         runtime_opt => {
-            let args = runtime_opt.map(|runtime| runtime.args.as_str()).unwrap_or("");
+            let args = runtime_opt.map_or("", |runtime| runtime.args.as_str());
             writeln!(pwsh).unwrap();
             writeln!(pwsh, "# Support pipeline input").unwrap();
             writeln!(pwsh, "if ($MyInvocation.ExpectingInput) {{").unwrap();
@@ -334,16 +379,71 @@ fn relative_target_windows(target_path: &Path, shim_path: &Path) -> String {
 
 const SH_SHIM_HEADER: &str = r#"#!/bin/sh
 basedir=$(dirname "$(echo "$0" | sed -e 's,\\,/,g')")
+basedir_win="$basedir"
+exe=""
+msys=""
 
-case `uname` in
-    *CYGWIN*|*MINGW*|*MSYS*)
-        if command -v cygpath > /dev/null 2>&1; then
-            basedir=`cygpath -w "$basedir"`
-        fi
-    ;;
+case `uname -a` in
+  *CYGWIN*|*MINGW*|*MSYS*)
+    if command -v cygpath > /dev/null 2>&1; then
+      basedir_win=`cygpath -w "$basedir"`
+    fi
+    exe=".exe"
+    msys="true"
+  ;;
+  *WSL2*)
+    if command -v wslpath > /dev/null 2>&1; then
+      basedir_win="$(wslpath -w "$basedir" 2> /dev/null)"
+      if [ $? -ne 0 ] || [ -z "$basedir_win" ]; then
+        basedir_win="$basedir"
+      else
+        exe=".exe"
+      fi
+    fi
+  ;;
 esac
 
 "#;
+
+fn indent_shell_block(script: &str) -> String {
+    script
+        .split('\n')
+        .map(|line| if line.is_empty() { String::new() } else { format!("  {line}") })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn escape_msys_cmd_switches(args: &str) -> String {
+    let mut escaped = String::with_capacity(args.len());
+    let mut chars = args.char_indices();
+    let mut at_boundary = true;
+
+    while let Some((_, ch)) = chars.next() {
+        if ch == '/' && at_boundary {
+            let mut lookahead = chars.clone();
+            if let Some((_, switch @ ('C' | 'c' | 'K' | 'k'))) = lookahead.next()
+                && lookahead.next().is_none_or(|(_, next)| next.is_whitespace())
+            {
+                escaped.push('/');
+                escaped.push('/');
+                escaped.push(switch);
+                chars.next();
+                at_boundary = false;
+                continue;
+            }
+        }
+
+        escaped.push(ch);
+        at_boundary = ch.is_whitespace();
+    }
+
+    escaped
+}
+
+fn strip_exe_suffix(prog: &str) -> Option<&str> {
+    let suffix_start = prog.len().checked_sub(4)?;
+    prog.as_bytes()[suffix_start..].eq_ignore_ascii_case(b".exe").then(|| &prog[..suffix_start])
+}
 
 /// Trailing `# cmd-shim-target=<rel>` marker. Upstream uses it to detect
 /// whether an existing shim already targets the same source without
@@ -356,6 +456,7 @@ fn shim_target_marker(target_path: &Path) -> String {
 /// Whether an already-on-disk shim targets `target_path`. Mirrors
 /// `isShimPointingAt`. The check looks for the trailing marker line so the
 /// header text never has to be byte-identical between cmd-shim versions.
+#[must_use]
 pub fn is_shim_pointing_at(shim_content: &str, target_path: &Path) -> bool {
     let marker = format!("# {}", shim_target_marker(target_path));
     shim_content.lines().any(|line| line == marker)

@@ -1,6 +1,6 @@
 {
   "name": "@pnpm/store.index",
-  "version": "1100.1.0",
+  "version": "1100.2.0",
   "description": "SQLite-backed index for the pnpm content-addressable store",
   "keywords": [
     "pnpm",
@@ -32,6 +32,7 @@
     ".test": "cross-env NODE_OPTIONS=\"$NODE_OPTIONS --experimental-vm-modules --disable-warning=ExperimentalWarning --disable-warning=DEP0169\" jest"
   },
   "dependencies": {
+    "@pnpm/error": "workspace:*",
     "msgpackr": "catalog:"
   },
   "devDependencies": {

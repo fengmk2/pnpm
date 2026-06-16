@@ -3,7 +3,7 @@ use command_extra::CommandExtra;
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use pacquet_testing_utils::bin::{AddMockedRegistry, CommandTempCwd};
 use pretty_assertions::assert_eq;
-use std::{ffi::OsStr, fs, path::Path, process::Command};
+use std::{ffi::OsStr, fmt::Write as _, fs, path::Path, process::Command};
 use tempfile::TempDir;
 
 const DEP: &str = "@pnpm.e2e/dep-of-pkg-with-1-dep";
@@ -53,7 +53,7 @@ fn set_ignore_dependencies(workspace: &Path, names: &[&str]) {
     }
     yaml.push_str("updateConfig:\n  ignoreDependencies:\n");
     for name in names {
-        yaml.push_str(&format!("    - \"{name}\"\n"));
+        writeln!(yaml, "    - \"{name}\"").unwrap();
     }
     fs::write(&yaml_path, yaml).expect("write pnpm-workspace.yaml");
 }
@@ -137,15 +137,51 @@ fn update_latest_rewrites_manifest() {
     drop((root, anchor));
 }
 
-/// `--save-exact` writes the bumped version without a range operator.
+/// `--latest` keeps the range operator the dependency already used, even
+/// when `--save-exact` is passed: a pre-existing pin takes precedence over
+/// the config default, matching pnpm's `calcRange`. (`pnpm update --latest
+/// --save-exact` on `^1.0.0` writes `^<latest>`, not the exact version.)
 #[test]
-fn update_latest_save_exact() {
+fn update_latest_save_exact_preserves_existing_caret() {
     let (root, workspace, anchor) = setup();
 
     write_manifest(&workspace, &format!(r#"{{ "{DEP}": "^100.0.0" }}"#));
     pacquet(&workspace, ["install"]).assert().success();
 
     pacquet(&workspace, ["update", "--latest", "--save-exact"]).assert().success();
+
+    assert_eq!(dep_spec(&workspace, DEP).as_deref(), Some("^101.0.0"));
+
+    drop((root, anchor));
+}
+
+/// `--latest` preserves a tilde range instead of widening it to the default
+/// caret — the gap this fix closes. Ports the prefix-preservation half of
+/// pnpm's `calcRange`.
+#[test]
+fn update_latest_preserves_tilde() {
+    let (root, workspace, anchor) = setup();
+
+    write_manifest(&workspace, &format!(r#"{{ "{DEP}": "~100.0.0" }}"#));
+    pacquet(&workspace, ["install"]).assert().success();
+
+    pacquet(&workspace, ["update", "--latest"]).assert().success();
+
+    assert_eq!(dep_spec(&workspace, DEP).as_deref(), Some("~101.0.0"));
+
+    drop((root, anchor));
+}
+
+/// `--latest` preserves an exact pin (no range operator) without needing
+/// `--save-exact`.
+#[test]
+fn update_latest_preserves_exact() {
+    let (root, workspace, anchor) = setup();
+
+    write_manifest(&workspace, &format!(r#"{{ "{DEP}": "100.0.0" }}"#));
+    pacquet(&workspace, ["install"]).assert().success();
+
+    pacquet(&workspace, ["update", "--latest"]).assert().success();
 
     assert_eq!(dep_spec(&workspace, DEP).as_deref(), Some("101.0.0"));
 
@@ -406,6 +442,178 @@ fn update_latest_with_spec_is_rejected() {
     assert!(
         stderr.contains("Specs are not allowed to be used with --latest"),
         "stderr did not mention the LATEST_WITH_SPEC error: {stderr}",
+    );
+
+    drop((root, anchor));
+}
+
+/// Append `catalogMode: strict` and a default `catalog:` with the given
+/// `(name, specifier)` entries to the harness-written
+/// `pnpm-workspace.yaml`.
+fn set_strict_catalog(workspace: &Path, entries: &[(&str, &str)]) {
+    let yaml_path = workspace.join("pnpm-workspace.yaml");
+    let mut yaml = fs::read_to_string(&yaml_path).expect("read pnpm-workspace.yaml");
+    if !yaml.ends_with('\n') {
+        yaml.push('\n');
+    }
+    yaml.push_str("catalogMode: strict\ncatalog:\n");
+    for (name, spec) in entries {
+        writeln!(yaml, "  \"{name}\": \"{spec}\"").unwrap();
+    }
+    fs::write(&yaml_path, yaml).expect("write pnpm-workspace.yaml");
+}
+
+/// Append a named `catalogs:` block (default `manual` catalogMode) to the
+/// harness-written `pnpm-workspace.yaml`.
+fn set_named_catalog(workspace: &Path, catalog: &str, entries: &[(&str, &str)]) {
+    let yaml_path = workspace.join("pnpm-workspace.yaml");
+    let mut yaml = fs::read_to_string(&yaml_path).expect("read pnpm-workspace.yaml");
+    if !yaml.ends_with('\n') {
+        yaml.push('\n');
+    }
+    writeln!(yaml, "catalogs:\n  {catalog}:").unwrap();
+    for (name, spec) in entries {
+        writeln!(yaml, "    \"{name}\": \"{spec}\"").unwrap();
+    }
+    fs::write(&yaml_path, yaml).expect("write pnpm-workspace.yaml");
+}
+
+fn read_workspace_yaml(workspace: &Path) -> String {
+    fs::read_to_string(workspace.join("pnpm-workspace.yaml")).expect("read pnpm-workspace.yaml")
+}
+
+/// An unmatched `--latest` selector is a no-op and must not read or parse
+/// the workspace catalogs: a malformed catalog config (here, the default
+/// catalog defined through both `catalog:` and `catalogs.default`) does not
+/// make the no-op fail. Guards the lazy catalog read against the eager read
+/// that previously ran whenever a `catalog:` dependency was present.
+#[test]
+fn update_latest_unmatched_selector_does_not_read_catalogs() {
+    let (root, workspace, anchor) = setup();
+
+    // A valid `catalog:` dependency (so the eager read would have triggered)
+    // alongside a default catalog defined twice (which a catalog read rejects
+    // with ERR_PNPM_..._CONFIGURATION).
+    write_manifest(&workspace, &format!(r#"{{ "{DEP}": "catalog:grp1" }}"#));
+    let yaml_path = workspace.join("pnpm-workspace.yaml");
+    let mut yaml = fs::read_to_string(&yaml_path).expect("read pnpm-workspace.yaml");
+    if !yaml.ends_with('\n') {
+        yaml.push('\n');
+    }
+    write!(
+        yaml,
+        "catalog:\n  \"a\": \"^1.0.0\"\ncatalogs:\n  default:\n    \"b\": \"^1.0.0\"\n  grp1:\n    \"{DEP}\": \"~100.0.0\"\n",
+    )
+    .unwrap();
+    fs::write(&yaml_path, yaml).expect("write pnpm-workspace.yaml");
+
+    // The selector matches no direct dependency, so the update returns early
+    // without ever reading the (malformed) catalogs.
+    pacquet(&workspace, ["update", "--latest", "not-a-dependency"]).assert().success();
+
+    drop((root, anchor));
+}
+
+/// `pacquet update --latest` on a `catalog:` dependency keeps the
+/// `catalog:` reference in `package.json` and bumps the catalog entry to
+/// the latest version, preserving the entry's own range operator — even
+/// under the default `manual` catalogMode (which does not auto-catalog).
+/// Without this, the reference was overwritten with a direct version.
+#[test]
+fn update_latest_catalog_preserves_reference_and_operator() {
+    let (root, workspace, anchor) = setup();
+
+    set_named_catalog(&workspace, "grp1", &[(DEP, "~100.0.0")]);
+    write_manifest(&workspace, &format!(r#"{{ "{DEP}": "catalog:grp1" }}"#));
+    pacquet(&workspace, ["install"]).assert().success();
+
+    pacquet(&workspace, ["update", "--latest"]).assert().success();
+
+    // The manifest still references the catalog, untouched.
+    assert_eq!(dep_spec(&workspace, DEP).as_deref(), Some("catalog:grp1"));
+
+    // The catalog entry is bumped to the latest version with its tilde
+    // operator preserved (not widened to the default caret).
+    let yaml = read_workspace_yaml(&workspace);
+    assert!(yaml.contains("~101.0.0"), "catalog entry should be bumped to ~101.0.0: {yaml}");
+    assert!(!yaml.contains("100.0.0"), "stale catalog entry should be gone: {yaml}");
+
+    drop((root, anchor));
+}
+
+/// `--latest --no-save` on a `catalog:` dependency leaves `package.json`
+/// and `pnpm-workspace.yaml` untouched, but still re-resolves the lockfile
+/// to the bumped version. The bumped catalog drives resolution in memory
+/// (via the install's catalogs override) without being persisted to disk —
+/// matching how a non-catalog `--no-save` update bumps the lockfile.
+#[test]
+fn update_latest_no_save_catalog_bumps_lockfile_only() {
+    let (root, workspace, anchor) = setup();
+
+    set_named_catalog(&workspace, "grp1", &[(DEP, "~100.0.0")]);
+    write_manifest(&workspace, &format!(r#"{{ "{DEP}": "catalog:grp1" }}"#));
+    pacquet(&workspace, ["install"]).assert().success();
+    assert!(virtual_store_has(&workspace, "@pnpm.e2e+dep-of-pkg-with-1-dep@100.0.0"));
+
+    pacquet(&workspace, ["update", "--latest", "--no-save"]).assert().success();
+
+    // package.json and the workspace catalog are untouched...
+    assert_eq!(dep_spec(&workspace, DEP).as_deref(), Some("catalog:grp1"));
+    let yaml = read_workspace_yaml(&workspace);
+    assert!(yaml.contains("~100.0.0"), "catalog entry must be untouched under --no-save: {yaml}");
+
+    // ...but the lockfile/store re-resolved to the bumped version.
+    eprintln!("virtual store contents: {:?}", list_virtual_store(&workspace));
+    assert!(virtual_store_has(&workspace, "@pnpm.e2e+dep-of-pkg-with-1-dep@101.0.0"));
+
+    drop((root, anchor));
+}
+
+/// The same preservation applies to the default catalog (`catalog:`).
+#[test]
+fn update_latest_default_catalog_preserves_reference() {
+    let (root, workspace, anchor) = setup();
+
+    set_named_catalog(&workspace, "default", &[(DEP, "^100.0.0")]);
+    write_manifest(&workspace, &format!(r#"{{ "{DEP}": "catalog:" }}"#));
+    pacquet(&workspace, ["install"]).assert().success();
+
+    pacquet(&workspace, ["update", "--latest"]).assert().success();
+
+    assert_eq!(dep_spec(&workspace, DEP).as_deref(), Some("catalog:"));
+
+    let yaml = read_workspace_yaml(&workspace);
+    assert!(yaml.contains("^101.0.0"), "catalog entry should be bumped to ^101.0.0: {yaml}");
+    assert!(!yaml.contains("100.0.0"), "stale catalog entry should be gone: {yaml}");
+
+    drop((root, anchor));
+}
+
+/// `pacquet update --lockfile-only <pkg>@<version>` under
+/// `catalogMode: strict`, where the catalog entry for `<pkg>` is a
+/// *range*, rejects with `ERR_PNPM_CATALOG_VERSION_MISMATCH` instead of
+/// crashing. This is the exact `Renovate` scenario ported from
+/// [pnpm#11706](https://github.com/pnpm/pnpm/pull/11706): before the fix,
+/// passing a range to the exact-version comparison threw `Invalid
+/// Version`.
+#[test]
+fn update_strict_catalog_range_mismatch_errors() {
+    let (root, workspace, anchor) = setup();
+    set_strict_catalog(&workspace, &[(DEP, "^100.0.0")]);
+    write_manifest(&workspace, &format!(r#"{{ "{DEP}": "catalog:" }}"#));
+
+    let output = pacquet(&workspace, ["update", "--lockfile-only", &format!("{DEP}@100.0.0")])
+        .output()
+        .expect("run pacquet update");
+    assert!(!output.status.success(), "a strict catalog range mismatch must fail the update");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Wanted dependency outside the version range defined in catalog"),
+        "stderr did not mention the catalog version mismatch: {stderr}",
+    );
+    assert!(
+        stderr.contains("ERR_PNPM_CATALOG_VERSION_MISMATCH"),
+        "stderr did not carry the error code: {stderr}",
     );
 
     drop((root, anchor));

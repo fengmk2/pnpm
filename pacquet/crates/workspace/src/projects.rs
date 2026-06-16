@@ -66,10 +66,10 @@ pub struct Project {
 /// option names.
 #[derive(Debug, Default, Clone)]
 pub struct FindWorkspaceProjectsOpts {
-    /// `packages:` from `pnpm-workspace.yaml`. When `None`, upstream
-    /// falls back to `['.', '**']`. Pacquet mirrors that default so a
-    /// workspace whose manifest only carries settings still enumerates
-    /// projects.
+    /// Package discovery patterns. When `None`, this lower-level
+    /// `findPackages` port falls back to `['.', '**']`. Callers
+    /// enumerating a real workspace manifest should pass
+    /// [`crate::workspace_package_patterns`] instead.
     pub patterns: Option<Vec<String>>,
 }
 
@@ -148,7 +148,7 @@ pub fn find_workspace_projects_no_check(
             }
             let normalized = normalize_pattern(body);
             Glob::new(&normalized).map_err(|err| FindWorkspaceProjectsError::InvalidGlob {
-                pattern: pattern.to_string(),
+                pattern: pattern.clone(),
                 message: err.to_string(),
             })?;
             user_negation_globs.push(normalized);
@@ -165,7 +165,10 @@ pub fn find_workspace_projects_no_check(
     // since `IGNORE_PATTERNS` is a constant and reparsing it on every
     // user-supplied pattern is wasted work.
     let ignore_template = wax::any(
-        IGNORE_PATTERNS.iter().copied().chain(user_negation_globs.iter().map(|s| s.as_str())),
+        IGNORE_PATTERNS
+            .iter()
+            .copied()
+            .chain(user_negation_globs.iter().map(std::string::String::as_str)),
     )
     .map_err(|err| FindWorkspaceProjectsError::InvalidGlob {
         pattern: "<built-in ignore>".to_string(),

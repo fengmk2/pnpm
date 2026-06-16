@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { stripVTControlCharacters } from 'node:util'
 
 import { getCatalogsFromWorkspaceManifest } from '@pnpm/catalogs.config'
 import { createMatcher } from '@pnpm/config.matcher'
@@ -29,6 +30,7 @@ import type {
   Config,
   ConfigContext,
   ConfigWithDeprecatedSettings,
+  PackageManagerNetworkConfig,
   ProjectConfig,
   UniversalOptions,
   VerifyDepsBeforeRun,
@@ -36,7 +38,7 @@ import type {
 } from './Config.js'
 import { isConfigFileKey } from './configFileKey.js'
 import { extractAndRemoveDependencyBuildOptions, hasDependencyBuildOptions } from './dependencyBuildOptions.js'
-import { getCacheDir, getConfigDir, getDataDir, getStateDir } from './dirs.js'
+import { getCacheDir, getConfigDir, getDataDir, getGlobalConfigPath, getStateDir } from './dirs.js'
 import { parseEnvVars } from './env.js'
 import { getNetworkConfigs } from './getNetworkConfigs.js'
 import { getOptionsFromPnpmSettings } from './getOptionsFromRootManifest.js'
@@ -52,6 +54,7 @@ import { types } from './types.js'
 export { types }
 
 export { getDefaultWorkspaceConcurrency, getWorkspaceConcurrency } from './concurrency.js'
+export { getGlobalConfigPath } from './dirs.js'
 export { getDefaultCreds, getNetworkConfigs, type NetworkConfigs } from './getNetworkConfigs.js'
 export { getOptionsFromPnpmSettings, type OptionsFromRootManifest } from './getOptionsFromRootManifest.js'
 export type { Creds } from './parseCreds.js'
@@ -205,6 +208,7 @@ export async function getConfig (opts: {
     userconfig: npmDefaults.userconfig,
     'verify-deps-before-run': 'install',
     'verify-store-integrity': true,
+    'frozen-store': false,
     'workspace-concurrency': getDefaultWorkspaceConcurrency(),
     'workspace-prefix': opts.workspaceDir,
     'embed-readme': false,
@@ -305,11 +309,12 @@ export async function getConfig (opts: {
       }
     }
     if (ignoredKeys.length > 0) {
-      const globalYamlConfigPath = path.join(configDir, GLOBAL_CONFIG_YAML_FILENAME)
+      const globalYamlConfigPath = getGlobalConfigPath(configDir)
       warnings.push(`The following settings cannot be set in the global config file ("${globalYamlConfigPath}") and were ignored: ${ignoredKeys.map(k => `"${k}"`).join(', ')}. Move them to a project-level pnpm-workspace.yaml. To share these settings across projects, use config dependencies: https://pnpm.io/11.x/config-dependencies`)
     }
     addSettingsFromWorkspaceManifestToConfig(pnpmConfig, {
       configFromCliOpts,
+      expandRequestDestinationEnv: true,
       projectManifest: undefined,
       workspaceDir: undefined,
       workspaceManifest: globalYamlConfig,
@@ -320,7 +325,21 @@ export async function getConfig (opts: {
     default: normalizeRegistryUrl(pnpmConfig.authConfig.registry),
     ...networkConfigs.registries,
   }
+  const trustedAuthConfig = pickIniConfig(npmrcResult.trustedConfig)
+  const trustedNetworkConfigs = getNetworkConfigs(trustedAuthConfig)
   pnpmConfig.registries = { ...registriesFromNpmrc }
+  if (explicitlySetKeys.has('registry') && typeof pnpmConfig.registry === 'string') {
+    pnpmConfig.registries.default = normalizeRegistryUrl(pnpmConfig.registry)
+  }
+  pnpmConfig.packageManagerRegistries = {
+    default: normalizeRegistryUrl(trustedAuthConfig.registry as string),
+    ...trustedNetworkConfigs.registries,
+  }
+  pnpmConfig.packageManagerNetworkConfig = createPackageManagerNetworkConfig(
+    npmrcResult.trustedConfig,
+    trustedNetworkConfigs.configByUri ?? {},
+    env
+  )
   pnpmConfig.configByUri = { ...networkConfigs.configByUri }
 
   // tokenHelper must only come from user-level config (~/.npmrc or global auth.ini),
@@ -491,6 +510,7 @@ export async function getConfig (opts: {
         throw new TypeError(`Unexpected type of registry, expecting a string but received ${JSON.stringify(value)}`)
       }
       pnpmConfig.registries.default = normalizeRegistryUrl(value)
+      pnpmConfig.packageManagerRegistries.default = normalizeRegistryUrl(value)
     }
   }
 
@@ -711,6 +731,42 @@ function getProcessEnv (env: string): string | undefined {
     process.env[env.toLowerCase()]
 }
 
+function createPackageManagerNetworkConfig (
+  trustedConfig: Record<string, unknown>,
+  configByUri: PackageManagerNetworkConfig['configByUri'],
+  env: Record<string, string | undefined>
+): PackageManagerNetworkConfig {
+  const httpsProxy = getProxyValue(
+    trustedConfig['https-proxy'] ?? trustedConfig.proxy,
+    getEnvValue(env, 'https_proxy')
+  )
+  const httpProxy = getProxyValue(
+    trustedConfig['http-proxy'],
+    httpsProxy ?? getEnvValue(env, 'http_proxy') ?? getEnvValue(env, 'proxy')
+  )
+  return {
+    ca: trustedConfig.ca as string | string[] | undefined,
+    cert: trustedConfig.cert as string | string[] | undefined,
+    configByUri,
+    httpProxy,
+    httpsProxy,
+    key: trustedConfig.key as string | undefined,
+    localAddress: trustedConfig['local-address'] as string | undefined,
+    noProxy: (trustedConfig['no-proxy'] ?? trustedConfig.noproxy ?? getEnvValue(env, 'no_proxy')) as string | boolean | undefined,
+    strictSsl: trustedConfig['strict-ssl'] as boolean | undefined,
+  }
+}
+
+function getEnvValue (env: Record<string, string | undefined>, key: string): string | undefined {
+  return env[key] ?? env[key.toUpperCase()] ?? env[key.toLowerCase()]
+}
+
+function getProxyValue (value: unknown, fallback: string | undefined): string | undefined {
+  if (value === false || value === null) return undefined
+  if (typeof value === 'string' && value.length > 0) return value
+  return fallback
+}
+
 // Look up a `pnpm_config_<key>` env var, accepting both lowercase and
 // uppercase forms. Used for env vars that need to be read before the
 // general parseEnvVars pass, such as those that affect which .npmrc file
@@ -738,8 +794,12 @@ function getWantedPackageManager (manifest: ProjectManifest): { pm?: WantedPacka
     }
     if (manifest.packageManager) {
       const legacyPm = parsePackageManager(manifest.packageManager)
-      if (legacyPm.name !== pmFromDevEngines.name || legacyPm.version !== pmFromDevEngines.version) {
-        warnings.push('Cannot use both "packageManager" and "devEngines.packageManager" in package.json. "packageManager" will be ignored')
+      const conflictWarning = getPackageManagerConflictWarning(legacyPm, {
+        name: pmFromDevEngines.name,
+        ...splitPackageManagerVersion(pmFromDevEngines.version),
+      })
+      if (conflictWarning) {
+        warnings.push(conflictWarning)
       }
     }
     return { pm: { ...pmFromDevEngines, fromDevEngines: true }, warnings }
@@ -793,17 +853,105 @@ function getIgnoredPnpmFieldKeys (manifest: ProjectManifest): string[] {
   return Object.keys(legacyField as Record<string, unknown>).filter(k => MIGRATED_PNPM_FIELD_KEYS.has(k))
 }
 
-export function parsePackageManager (packageManager: string): { name: string, version: string | undefined } {
-  if (!packageManager.includes('@')) return { name: packageManager, version: undefined }
-  const [name, pmReference] = packageManager.split('@')
+export interface ParsedPackageManager {
+  name: string
+  version: string | undefined
+  hash: string | undefined
+}
+
+export function parsePackageManager (packageManager: string): ParsedPackageManager {
+  // Split on the `@` that separates the name from the reference. A leading `@`
+  // belongs to a scoped name (e.g. `@scope/pm@1.2.3`), so skip it; otherwise
+  // the first `@` is the separator. The first `@` (not the last) is used so a
+  // reference that is a URL containing `@` (e.g. credentials) stays intact.
+  const separatorIndex = packageManager.startsWith('@')
+    ? packageManager.indexOf('@', 1)
+    : packageManager.indexOf('@')
+  if (separatorIndex === -1) return { name: packageManager, version: undefined, hash: undefined }
+  const name = packageManager.slice(0, separatorIndex)
+  const pmReference = packageManager.slice(separatorIndex + 1)
   // pmReference is semantic versioning, not URL
-  if (pmReference.includes(':')) return { name, version: undefined }
-  // Remove the integrity hash. Ex: "pnpm@9.5.0+sha512.140036830124618d624a2187b50d04289d5a087f326c9edfc0ccd733d76c4f52c3a313d4fc148794a2a9d81553016004e6742e8cf850670268a7387fc220c903"
-  const [version] = pmReference.split('+')
-  return {
-    name,
-    version,
+  if (pmReference.includes(':')) return { name, version: undefined, hash: undefined }
+  return { name, ...splitPackageManagerVersion(pmReference) }
+}
+
+/**
+ * Splits a package manager version reference into its semver part and the
+ * integrity hash carried as semver build metadata, e.g.
+ * "9.5.0+sha512.140036830124618d624a2187b50d04289d5a087f326c9edfc0ccd733d76c4f52c3a313d4fc148794a2a9d81553016004e6742e8cf850670268a7387fc220c903"
+ * becomes `{ version: "9.5.0", hash: "sha512.14003…" }`. A reference without a
+ * hash yields an undefined hash; an undefined reference yields both undefined.
+ */
+function splitPackageManagerVersion (reference: string | undefined): { version: string | undefined, hash: string | undefined } {
+  if (reference == null) return { version: undefined, hash: undefined }
+  // Split on the first `+` only. The integrity hash is semver build metadata —
+  // everything after that `+` — and must be preserved whole, so a reference is
+  // never truncated at a later `+`.
+  const hashIndex = reference.indexOf('+')
+  if (hashIndex === -1) return { version: reference, hash: undefined }
+  return { version: reference.slice(0, hashIndex), hash: reference.slice(hashIndex + 1) }
+}
+
+/**
+ * Describes how the legacy `packageManager` field disagrees with
+ * `devEngines.packageManager`, or returns undefined when the two specifiers are
+ * identical (so keeping both fields in sync produces no warning). Any
+ * divergence warns — including an integrity hash (semver build metadata) on
+ * only one side, since dropping the ignored `packageManager` field would lose
+ * it. In every conflict `devEngines.packageManager` wins and `packageManager`
+ * is ignored.
+ */
+function getPackageManagerConflictWarning (legacy: ParsedPackageManager, devEngines: ParsedPackageManager): string | undefined {
+  const ignoredSuffix = '. "packageManager" will be ignored'
+  const genericWarning = `Cannot use both "packageManager" and "devEngines.packageManager" in package.json${ignoredSuffix}`
+  if (legacy.name !== devEngines.name) {
+    return `"packageManager" (${sanitizeManifestValue(legacy.name)}) and "devEngines.packageManager" (${sanitizeManifestValue(devEngines.name)}) specify different package managers in package.json${ignoredSuffix}`
   }
+  if (legacy.version !== devEngines.version) {
+    // "different versions" only makes sense when both sides are concrete
+    // versions. If one side has no semver version — e.g. the legacy field is a
+    // URL or a bare name — fall back to the generic notice rather than claiming
+    // a version mismatch.
+    if (legacy.version == null || devEngines.version == null) return genericWarning
+    return `"packageManager" and "devEngines.packageManager" specify different versions of ${sanitizeManifestValue(legacy.name)} in package.json${ignoredSuffix}`
+  }
+  if (legacy.hash !== devEngines.hash) {
+    // Same name and version, but the integrity hashes differ. Two distinct
+    // hashes for one version is a likely wrong-hash mistake, so call it out
+    // specifically; a hash on only one side is a softer mismatch (the version
+    // still agrees) and gets the generic notice.
+    if (legacy.hash != null && devEngines.hash != null && legacy.version != null) {
+      return `"packageManager" and "devEngines.packageManager" specify ${sanitizeManifestValue(legacy.name)}@${sanitizeManifestValue(legacy.version)} with different integrity hashes in package.json${ignoredSuffix}`
+    }
+    return genericWarning
+  }
+  return undefined
+}
+
+/**
+ * Renders a package.json-controlled value safe to embed in a warning printed to
+ * the terminal. Strips ANSI escape sequences and replaces remaining control
+ * characters (including newlines) with spaces so a malicious manifest cannot
+ * forge or rewrite terminal/CI log output.
+ */
+function sanitizeManifestValue (value: string): string {
+  // eslint-disable-next-line no-control-regex
+  return stripVTControlCharacters(value).replace(/[\u0000-\u001f\u007f]/g, ' ')
+}
+
+/**
+ * Decides whether the resolved pnpm integrity info should be written to
+ * `pnpm-lock.yaml` under the project's `packageManagerDependencies` section.
+ *
+ * `onFail: ignore` means pnpm should not enforce or record the package manager
+ * policy. Otherwise, `devEngines.packageManager` persists because it may use
+ * ranges, while the legacy `packageManager` field only persists for pnpm v12+.
+ */
+export function shouldPersistLockfile (pm: Pick<WantedPackageManager, 'version' | 'fromDevEngines' | 'onFail'>): boolean {
+  if (pm.onFail === 'ignore') return false
+  if (pm.fromDevEngines === true) return true
+  if (pm.version == null || semver.valid(pm.version) == null) return false
+  return semver.major(pm.version) >= 12
 }
 
 function parseDevEnginesPackageManager (devEngines?: DevEngines): EngineDependency | undefined {
@@ -858,16 +1006,18 @@ function getNodeVersionFromEnginesRuntime (manifest: ProjectManifest): string | 
 
 function addSettingsFromWorkspaceManifestToConfig (pnpmConfig: Config & ConfigContext, {
   configFromCliOpts,
+  expandRequestDestinationEnv,
   projectManifest,
   workspaceManifest,
   workspaceDir,
 }: {
   configFromCliOpts: Record<string, unknown>
+  expandRequestDestinationEnv?: boolean
   projectManifest: ProjectManifest | undefined
   workspaceDir: string | undefined
   workspaceManifest: WorkspaceManifest
 }): void {
-  const newSettings = Object.assign(getOptionsFromPnpmSettings(workspaceDir, workspaceManifest, projectManifest), configFromCliOpts)
+  const newSettings = Object.assign(getOptionsFromPnpmSettings(workspaceDir, workspaceManifest, { manifest: projectManifest, expandRequestDestinationEnv }), configFromCliOpts)
   for (const [key, value] of Object.entries(newSettings)) {
     if (!isCamelCase(key)) continue
 

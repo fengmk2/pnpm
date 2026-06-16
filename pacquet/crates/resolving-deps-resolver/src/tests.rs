@@ -1,4 +1,4 @@
-use std::{collections::HashMap, str::FromStr, sync::Mutex};
+use std::{collections::HashMap, str::FromStr, sync::Mutex, time::Duration};
 
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use pacquet_resolving_resolver_base::{
@@ -42,6 +42,40 @@ impl Resolver for StubResolver {
     }
 }
 
+struct DelayedAliasResolver {
+    table: HashMap<(String, String), ResolveResult>,
+    delayed_alias: String,
+}
+
+impl Resolver for DelayedAliasResolver {
+    fn resolve<'a>(
+        &'a self,
+        wanted: &'a WantedDependency,
+        _opts: &'a ResolveOptions,
+    ) -> ResolveFuture<'a> {
+        let key = (
+            wanted.alias.clone().unwrap_or_default(),
+            wanted.bare_specifier.clone().unwrap_or_default(),
+        );
+        let result = self.table.get(&key).cloned();
+        let should_delay = key.0 == self.delayed_alias;
+        Box::pin(async move {
+            if should_delay {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Ok::<_, ResolveError>(result)
+        })
+    }
+
+    fn resolve_latest<'a>(
+        &'a self,
+        _query: &'a LatestQuery,
+        _opts: &'a ResolveOptions,
+    ) -> ResolveLatestFuture<'a> {
+        Box::pin(async { Ok(None) })
+    }
+}
+
 fn fake_result(name: &str, version: &str, manifest: serde_json::Value) -> ResolveResult {
     use pacquet_lockfile::{LockfileResolution, PkgName, PkgNameVer, TarballResolution};
     let name_ver = PkgNameVer::new(
@@ -67,6 +101,10 @@ fn fake_result(name: &str, version: &str, manifest: serde_json::Value) -> Resolv
     }
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "test helper called from multiple sites with owned literals; by-value keeps the call sites clean"
+)]
 fn fake_manifest(root_deps: serde_json::Value) -> (tempfile::TempDir, PackageManifest) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("package.json");
@@ -119,6 +157,7 @@ async fn walks_dependencies_and_builds_flat_tree() {
             manifest_hook: None,
             pnpmfile_hook: None,
             read_package_log: None,
+            auto_install_peers: false,
         },
     )
     .await
@@ -136,6 +175,85 @@ async fn walks_dependencies_and_builds_flat_tree() {
     let bar_tree_node = tree.dependencies_tree.get(bar_node_id).unwrap();
     assert_eq!(bar_tree_node.resolved_package_id, "bar@2.3.0");
     assert!(tree.policy_violations.is_empty());
+}
+
+#[tokio::test]
+async fn shallower_revisit_takes_over_shared_children_context() {
+    let mut table = HashMap::new();
+    table.insert(
+        ("a".to_string(), "1.0.0".to_string()),
+        fake_result(
+            "a",
+            "1.0.0",
+            serde_json::json!({
+                "name": "a",
+                "version": "1.0.0",
+                "dependencies": { "cycle": "1.0.0" }
+            }),
+        ),
+    );
+    table.insert(
+        ("cycle".to_string(), "1.0.0".to_string()),
+        fake_result(
+            "cycle",
+            "1.0.0",
+            serde_json::json!({
+                "name": "cycle",
+                "version": "1.0.0",
+                "dependencies": { "shared": "1.0.0" }
+            }),
+        ),
+    );
+    table.insert(
+        ("c".to_string(), "1.0.0".to_string()),
+        fake_result(
+            "c",
+            "1.0.0",
+            serde_json::json!({
+                "name": "c",
+                "version": "1.0.0",
+                "dependencies": { "shared": "1.0.0" }
+            }),
+        ),
+    );
+    table.insert(
+        ("shared".to_string(), "1.0.0".to_string()),
+        fake_result(
+            "shared",
+            "1.0.0",
+            serde_json::json!({
+                "name": "shared",
+                "version": "1.0.0",
+                "dependencies": { "cycle": "1.0.0" }
+            }),
+        ),
+    );
+    let resolver = DelayedAliasResolver { table, delayed_alias: "c".to_string() };
+    let (_tmp, manifest) = fake_manifest(serde_json::json!({
+        "a": "1.0.0",
+        "c": "1.0.0"
+    }));
+
+    let tree = resolve_dependency_tree(
+        &resolver,
+        &manifest,
+        [DependencyGroup::Prod],
+        ResolveDependencyTreeOptions {
+            base_opts: ResolveOptions::default(),
+            patched_dependencies: None,
+            manifest_hook: None,
+            pnpmfile_hook: None,
+            read_package_log: None,
+            auto_install_peers: false,
+        },
+    )
+    .await
+    .unwrap();
+
+    let shared_children = tree.children_by_id.get("shared@1.0.0").expect("shared children");
+    assert_eq!(shared_children.len(), 1);
+    assert_eq!(shared_children[0].alias, "cycle");
+    assert_eq!(shared_children[0].pkg_id, "cycle@1.0.0");
 }
 
 #[tokio::test]
@@ -189,6 +307,7 @@ async fn dedupes_when_the_same_package_appears_in_two_subtrees() {
             manifest_hook: None,
             pnpmfile_hook: None,
             read_package_log: None,
+            auto_install_peers: false,
         },
     )
     .await
@@ -275,6 +394,7 @@ async fn workspace_link_node_is_short_circuited_in_tree() {
             manifest_hook: None,
             pnpmfile_hook: None,
             read_package_log: None,
+            auto_install_peers: false,
         },
     )
     .await
@@ -317,6 +437,7 @@ async fn declined_specifier_surfaces_spec_not_supported_error() {
             manifest_hook: None,
             pnpmfile_hook: None,
             read_package_log: None,
+            auto_install_peers: false,
         },
     )
     .await
@@ -362,6 +483,7 @@ async fn transitive_dep_with_traversal_alias_is_rejected() {
             manifest_hook: None,
             pnpmfile_hook: None,
             read_package_log: None,
+            auto_install_peers: false,
         },
     )
     .await
@@ -441,6 +563,7 @@ mod block_exotic_subdeps {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -484,6 +607,7 @@ mod block_exotic_subdeps {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -528,6 +652,7 @@ mod block_exotic_subdeps {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -574,6 +699,7 @@ mod block_exotic_subdeps {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -617,6 +743,7 @@ mod peers {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -629,6 +756,64 @@ mod peers {
         );
         assert!(result.peer_dependency_issues.missing.is_empty());
         assert!(result.peer_dependency_issues.bad.is_empty());
+    }
+
+    /// `p → q → p` is a cycle whose re-entry of `p` resolves against truncated
+    /// children: with `q` dropped to break the cycle, that occurrence of `p`
+    /// looks peer-free. It must not be cached as pure, or the sibling occurrence
+    /// reached through `w` short-circuits and loses the optional transitive peer
+    /// `e` that `q` declares — churning the lockfile by traversal order.
+    /// <https://github.com/pnpm/pnpm/issues/5108>
+    #[tokio::test]
+    async fn cycle_reentry_does_not_drop_sibling_occurrence_transitive_peers() {
+        let mut table = HashMap::new();
+        for (name, manifest) in [
+            (
+                "p",
+                serde_json::json!({ "name": "p", "version": "1.0.0", "dependencies": { "q": "1.0.0" } }),
+            ),
+            (
+                "q",
+                serde_json::json!({ "name": "q", "version": "1.0.0", "dependencies": { "p": "1.0.0" }, "peerDependencies": { "e": "1.0.0" }, "peerDependenciesMeta": { "e": { "optional": true } } }),
+            ),
+            (
+                "w",
+                serde_json::json!({ "name": "w", "version": "1.0.0", "dependencies": { "p": "1.0.0" } }),
+            ),
+        ] {
+            table.insert(
+                (name.to_string(), "1.0.0".to_string()),
+                fake_result(name, "1.0.0", manifest),
+            );
+        }
+        let resolver = StubResolver { table, calls: Mutex::new(Vec::new()) };
+        let (_tmp, manifest) = fake_manifest(serde_json::json!({ "p": "1.0.0", "w": "1.0.0" }));
+        let mut tree = resolve_dependency_tree(
+            &resolver,
+            &manifest,
+            [DependencyGroup::Prod],
+            ResolveDependencyTreeOptions {
+                base_opts: ResolveOptions::default(),
+                patched_dependencies: None,
+                manifest_hook: None,
+                pnpmfile_hook: None,
+                read_package_log: None,
+                auto_install_peers: false,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(tree.all_peer_dep_names.contains("e"));
+
+        let result = resolve_peers(&mut tree, ResolvePeersOptions::default());
+        for name in ["p@1.0.0", "w@1.0.0"] {
+            let entry = result.graph.get(&DepPath::from(name.to_string())).expect("entry in graph");
+            assert!(
+                entry.transitive_peer_dependencies.contains("e"),
+                "{name} should carry transitive peer 'e', got {:?}",
+                entry.transitive_peer_dependencies,
+            );
+        }
     }
 
     /// `parent → child` where `child` declares `react` as a peer and
@@ -670,6 +855,7 @@ mod peers {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -721,6 +907,7 @@ mod peers {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -775,6 +962,7 @@ mod peers {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -900,6 +1088,7 @@ mod peers {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -919,6 +1108,286 @@ mod peers {
                 "c@1.0.0".to_string(),
             ],
         );
+    }
+
+    /// A package's graph-node `depth` is the minimum across all
+    /// occurrences, even when the shallower one short-circuits through the
+    /// `pure_pkgs` fast path (which has no `NodeRecord`). `p` is reached at
+    /// depth 2 via `a → b → p` (walked first, so its record carries depth
+    /// 2) and at depth 1 via `c → p` (a pure-pkgs revisit). The rebuilt
+    /// graph must record depth 1. Regression guard for the `build_final_graph`
+    /// depth tie-break.
+    #[tokio::test]
+    async fn shallower_pure_pkgs_revisit_lowers_graph_depth() {
+        let mut table = HashMap::new();
+        table.insert(
+            ("a".to_string(), "1.0.0".to_string()),
+            fake_result(
+                "a",
+                "1.0.0",
+                serde_json::json!({
+                    "name": "a",
+                    "version": "1.0.0",
+                    "dependencies": { "b": "1.0.0" }
+                }),
+            ),
+        );
+        table.insert(
+            ("b".to_string(), "1.0.0".to_string()),
+            fake_result(
+                "b",
+                "1.0.0",
+                serde_json::json!({
+                    "name": "b",
+                    "version": "1.0.0",
+                    "dependencies": { "p": "1.0.0" }
+                }),
+            ),
+        );
+        table.insert(
+            ("c".to_string(), "1.0.0".to_string()),
+            fake_result(
+                "c",
+                "1.0.0",
+                serde_json::json!({
+                    "name": "c",
+                    "version": "1.0.0",
+                    "dependencies": { "p": "1.0.0" }
+                }),
+            ),
+        );
+        // `p` has a dep `q` so it gets per-occurrence NodeIds (a shared
+        // leaf would already carry its minimum depth in the tree). Its
+        // whole subtree is peer-free, so the second, shallower occurrence
+        // under `c` takes the `pure_pkgs` fast path — which records no
+        // `NodeRecord`, the case the rebuild must still account for.
+        table.insert(
+            ("p".to_string(), "1.0.0".to_string()),
+            fake_result(
+                "p",
+                "1.0.0",
+                serde_json::json!({
+                    "name": "p",
+                    "version": "1.0.0",
+                    "dependencies": { "q": "1.0.0" }
+                }),
+            ),
+        );
+        table.insert(
+            ("q".to_string(), "1.0.0".to_string()),
+            fake_result("q", "1.0.0", serde_json::json!({ "name": "q", "version": "1.0.0" })),
+        );
+        let resolver = StubResolver { table, calls: Mutex::new(Vec::new()) };
+        // `a` precedes `c` so `p` is first walked at depth 2 (`a → b → p`),
+        // then revisited at depth 1 (`c → p`).
+        let (_tmp, manifest) = fake_manifest(serde_json::json!({ "a": "1.0.0", "c": "1.0.0" }));
+        let mut tree = resolve_dependency_tree(
+            &resolver,
+            &manifest,
+            [DependencyGroup::Prod],
+            ResolveDependencyTreeOptions {
+                base_opts: ResolveOptions::default(),
+                patched_dependencies: None,
+                manifest_hook: None,
+                pnpmfile_hook: None,
+                read_package_log: None,
+                auto_install_peers: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = resolve_peers(&mut tree, ResolvePeersOptions::default());
+        let p_node = &result.graph[&DepPath::from("p@1.0.0".to_string())];
+        assert_eq!(p_node.depth, 1, "p's graph depth must be the minimum (1), not 2");
+    }
+
+    /// Port of upstream's
+    /// [`"a peer's own peer is shared with a sibling that peer-depends both"`](https://github.com/pnpm/pnpm/blob/894ea6af2c/installing/deps-resolver/test/resolvePeers.ts#L1207).
+    /// `plugin` peer-depends both `parser` and `typescript`; `parser`
+    /// peer-depends `typescript`. `plugin` and `parser` live under
+    /// `umbrella` (under `app`, which also brings `typescript@1.0.0`), while
+    /// the importer also has a top-level `typescript@2.0.0` + `parser@1.0.0`.
+    /// `plugin`'s `parser` must resolve `typescript@1.0.0` — the version
+    /// `plugin` itself uses — not be shadowed by the top-level `parser` that
+    /// resolved `typescript@2.0.0`. Exercises the depPath suffix machinery.
+    #[tokio::test]
+    async fn peers_own_peer_shared_with_sibling_that_peer_depends_both() {
+        let mut table = HashMap::new();
+        for version in ["1.0.0", "2.0.0"] {
+            table.insert(
+                ("typescript".to_string(), version.to_string()),
+                fake_result(
+                    "typescript",
+                    version,
+                    serde_json::json!({ "name": "typescript", "version": version }),
+                ),
+            );
+        }
+        table.insert(
+            ("parser".to_string(), "1.0.0".to_string()),
+            fake_result(
+                "parser",
+                "1.0.0",
+                serde_json::json!({
+                    "name": "parser",
+                    "version": "1.0.0",
+                    "peerDependencies": { "typescript": "*" }
+                }),
+            ),
+        );
+        table.insert(
+            ("plugin".to_string(), "1.0.0".to_string()),
+            fake_result(
+                "plugin",
+                "1.0.0",
+                serde_json::json!({
+                    "name": "plugin",
+                    "version": "1.0.0",
+                    "peerDependencies": { "parser": "*", "typescript": "*" }
+                }),
+            ),
+        );
+        table.insert(
+            ("umbrella".to_string(), "1.0.0".to_string()),
+            fake_result(
+                "umbrella",
+                "1.0.0",
+                serde_json::json!({
+                    "name": "umbrella",
+                    "version": "1.0.0",
+                    "dependencies": { "plugin": "1.0.0", "parser": "1.0.0" },
+                    "peerDependencies": { "typescript": "*" }
+                }),
+            ),
+        );
+        table.insert(
+            ("app".to_string(), "1.0.0".to_string()),
+            fake_result(
+                "app",
+                "1.0.0",
+                serde_json::json!({
+                    "name": "app",
+                    "version": "1.0.0",
+                    "dependencies": { "typescript": "1.0.0", "umbrella": "1.0.0" }
+                }),
+            ),
+        );
+        let resolver = StubResolver { table, calls: Mutex::new(Vec::new()) };
+        let (_tmp, manifest) = fake_manifest(serde_json::json!({
+            "typescript": "2.0.0",
+            "parser": "1.0.0",
+            "app": "1.0.0",
+        }));
+        let mut tree = resolve_dependency_tree(
+            &resolver,
+            &manifest,
+            [DependencyGroup::Prod],
+            ResolveDependencyTreeOptions {
+                base_opts: ResolveOptions::default(),
+                patched_dependencies: None,
+                manifest_hook: None,
+                pnpmfile_hook: None,
+                read_package_log: None,
+                auto_install_peers: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = resolve_peers(&mut tree, ResolvePeersOptions::default());
+        let keys: Vec<String> = result.graph.keys().map(|dp| dp.as_str().to_string()).collect();
+        assert!(
+            keys.contains(
+                &"plugin@1.0.0(parser@1.0.0(typescript@1.0.0))(typescript@1.0.0)".to_string()
+            ),
+            "plugin's parser must resolve typescript@1.0.0; got: {keys:?}",
+        );
+        assert!(
+            !keys.contains(
+                &"plugin@1.0.0(parser@1.0.0(typescript@2.0.0))(typescript@1.0.0)".to_string()
+            ),
+            "plugin's parser must not be shadowed by the top-level typescript@2.0.0: {keys:?}",
+        );
+    }
+
+    /// A peer that is a walk-ancestor must still carry its own peer
+    /// suffix in the dependent's depPath. `a` is a direct dep with peer
+    /// `c`; its child `b` peer-depends on `a`. While `b`'s suffix is
+    /// being built, `a` is mid-walk (in-progress) so its depPath isn't
+    /// finalized yet. The post-walk [`build_final_dep_paths`] pass must
+    /// resolve `a` to its full `a@1.0.0(c@1.0.0)` — not the collapsed
+    /// `a@1.0.0` the cycle fallback would emit (pnpm only collapses
+    /// genuine cycles, and `a→b→a` here resolves because `a` and `b`
+    /// don't form a peer-graph SCC). Regression test for
+    /// <https://github.com/pnpm/pnpm/issues/12266>.
+    #[tokio::test]
+    async fn ancestor_peer_carries_its_own_suffix() {
+        let mut table = HashMap::new();
+        table.insert(
+            ("a".to_string(), "1.0.0".to_string()),
+            fake_result(
+                "a",
+                "1.0.0",
+                serde_json::json!({
+                    "name": "a",
+                    "version": "1.0.0",
+                    "dependencies": { "b": "1.0.0" },
+                    "peerDependencies": { "c": "*" }
+                }),
+            ),
+        );
+        table.insert(
+            ("b".to_string(), "1.0.0".to_string()),
+            fake_result(
+                "b",
+                "1.0.0",
+                serde_json::json!({
+                    "name": "b",
+                    "version": "1.0.0",
+                    "peerDependencies": { "a": "*" }
+                }),
+            ),
+        );
+        table.insert(
+            ("c".to_string(), "1.0.0".to_string()),
+            fake_result("c", "1.0.0", serde_json::json!({ "name": "c", "version": "1.0.0" })),
+        );
+        let resolver = StubResolver { table, calls: Mutex::new(Vec::new()) };
+        let (_tmp, manifest) = fake_manifest(serde_json::json!({ "a": "1.0.0", "c": "1.0.0" }));
+        let mut tree = resolve_dependency_tree(
+            &resolver,
+            &manifest,
+            [DependencyGroup::Prod],
+            ResolveDependencyTreeOptions {
+                base_opts: ResolveOptions::default(),
+                patched_dependencies: None,
+                manifest_hook: None,
+                pnpmfile_hook: None,
+                read_package_log: None,
+                auto_install_peers: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = resolve_peers(&mut tree, ResolvePeersOptions::default());
+        let mut keys: Vec<String> = result.graph.keys().map(|dp| dp.as_str().to_string()).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "a@1.0.0(c@1.0.0)".to_string(),
+                "b@1.0.0(a@1.0.0(c@1.0.0))".to_string(),
+                "c@1.0.0".to_string(),
+            ],
+        );
+
+        // `c` is `a`'s peer, not `b`'s — it must not leak into `b`'s
+        // dependencies (only `b`'s own peer `a` is a child of `b`).
+        let b_node = &result.graph[&DepPath::from("b@1.0.0(a@1.0.0(c@1.0.0))".to_string())];
+        let b_children: Vec<&str> = b_node.children.keys().map(String::as_str).collect();
+        assert_eq!(b_children, vec!["a"]);
     }
 
     /// Shared fixture for the `dedupe_peers_*` pair: react@18 plus
@@ -980,6 +1449,7 @@ mod peers {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -1030,6 +1500,7 @@ mod peers {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -1128,6 +1599,7 @@ mod peers {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -1224,6 +1696,7 @@ mod peers {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -1332,6 +1805,7 @@ mod peers {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -1402,6 +1876,7 @@ mod peers {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -1513,6 +1988,7 @@ mod peers {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -1622,6 +2098,7 @@ mod peers {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -1733,6 +2210,7 @@ mod peers {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -1748,6 +2226,7 @@ mod peers {
                 exclude_links_from_lockfile: true,
                 lockfile_dir: Some(lockfile_dir),
                 modules_dir: Some(modules_dir),
+                hoist_missing_scope: None,
             },
         );
 
@@ -1827,6 +2306,7 @@ mod patched_dependencies {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -1876,6 +2356,7 @@ mod patched_dependencies {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -1911,6 +2392,7 @@ mod patched_dependencies {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -1962,6 +2444,7 @@ mod patched_dependencies {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -1980,6 +2463,10 @@ mod optional_propagation {
     /// `optionalDependencies` blocks — the bundled `fake_manifest`
     /// helper only writes to `dependencies` so it can't exercise the
     /// importer-level optional flag.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "test helpers take owned literal fixtures by value to keep call sites clean"
+    )]
     fn manifest_with_groups(
         prod: serde_json::Value,
         optional: serde_json::Value,
@@ -2033,6 +2520,7 @@ mod optional_propagation {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -2089,6 +2577,7 @@ mod optional_propagation {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -2155,6 +2644,7 @@ mod optional_propagation {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -2209,6 +2699,7 @@ mod optional_propagation {
                 manifest_hook: None,
                 pnpmfile_hook: None,
                 read_package_log: None,
+                auto_install_peers: false,
             },
         )
         .await
@@ -2221,6 +2712,480 @@ mod optional_propagation {
         assert!(
             tree.packages.get("transitive@1.0.0").expect("transitive resolved").optional,
             "child reached only via a parent's optionalDependencies edge is optional",
+        );
+    }
+}
+
+mod importer_wanted_specs {
+    use super::{DependencyGroup, PackageManifest};
+    use crate::resolve_dependency_tree::importer_direct_wanted_specs;
+    use pretty_assertions::assert_eq;
+
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "test helpers take owned literal fixtures by value to keep call sites clean"
+    )]
+    fn manifest_with(groups: serde_json::Value) -> (tempfile::TempDir, PackageManifest) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("package.json");
+        let mut json = serde_json::json!({ "name": "root", "version": "0.0.0" });
+        json.as_object_mut().unwrap().extend(groups.as_object().unwrap().clone());
+        std::fs::write(&path, serde_json::to_string(&json).unwrap()).expect("write package.json");
+        let manifest = PackageManifest::from_path(path).expect("parse package.json");
+        (tmp, manifest)
+    }
+
+    const ALL_GROUPS: [DependencyGroup; 3] =
+        [DependencyGroup::Prod, DependencyGroup::Dev, DependencyGroup::Optional];
+
+    #[test]
+    fn regular_dep_wins_over_own_peer_with_auto_install_peers() {
+        let (_tmp, manifest) = manifest_with(serde_json::json!({
+            "devDependencies": { "foo": "workspace:*" },
+            "peerDependencies": { "foo": "^1.0.0" },
+        }));
+        let wanted = importer_direct_wanted_specs(
+            &manifest,
+            ALL_GROUPS,
+            true,
+            &pacquet_catalogs_types::Catalogs::new(),
+        )
+        .unwrap();
+        assert_eq!(wanted, vec![("foo".to_string(), "workspace:*".to_string(), false, false)]);
+    }
+
+    #[test]
+    fn peer_only_dep_is_wanted_with_auto_install_peers() {
+        let (_tmp, manifest) = manifest_with(serde_json::json!({
+            "peerDependencies": { "peer-only": "^2.0.0" },
+        }));
+        let wanted = importer_direct_wanted_specs(
+            &manifest,
+            ALL_GROUPS,
+            true,
+            &pacquet_catalogs_types::Catalogs::new(),
+        )
+        .unwrap();
+        assert_eq!(wanted, vec![("peer-only".to_string(), "^2.0.0".to_string(), false, false)]);
+    }
+
+    #[test]
+    fn peer_only_dep_is_not_wanted_without_auto_install_peers() {
+        let (_tmp, manifest) = manifest_with(serde_json::json!({
+            "dependencies": { "regular": "^1.0.0" },
+            "peerDependencies": { "peer-only": "^2.0.0" },
+        }));
+        let wanted = importer_direct_wanted_specs(
+            &manifest,
+            ALL_GROUPS,
+            false,
+            &pacquet_catalogs_types::Catalogs::new(),
+        )
+        .unwrap();
+        assert_eq!(wanted, vec![("regular".to_string(), "^1.0.0".to_string(), false, false)]);
+    }
+
+    #[test]
+    fn later_regular_group_range_replaces_earlier_one() {
+        let (_tmp, manifest) = manifest_with(serde_json::json!({
+            "dependencies": { "foo": "^1.0.0" },
+            "optionalDependencies": { "foo": "^2.0.0" },
+        }));
+        let wanted = importer_direct_wanted_specs(
+            &manifest,
+            ALL_GROUPS,
+            false,
+            &pacquet_catalogs_types::Catalogs::new(),
+        )
+        .unwrap();
+        assert_eq!(wanted, vec![("foo".to_string(), "^2.0.0".to_string(), true, false)]);
+    }
+}
+
+mod peer_own_dep_shadowing {
+    use super::{
+        DependencyGroup, HashMap, Mutex, ResolveDependencyTreeOptions, ResolveOptions,
+        StubResolver, fake_manifest, fake_result, resolve_dependency_tree,
+    };
+
+    fn opts(auto_install_peers: bool) -> ResolveDependencyTreeOptions {
+        ResolveDependencyTreeOptions {
+            base_opts: ResolveOptions::default(),
+            patched_dependencies: None,
+            manifest_hook: None,
+            pnpmfile_hook: None,
+            read_package_log: None,
+            auto_install_peers,
+        }
+    }
+
+    fn parser_table() -> HashMap<(String, String), pacquet_resolving_resolver_base::ResolveResult> {
+        let mut table = HashMap::new();
+        table.insert(
+            ("parser".to_string(), "^1.0.0".to_string()),
+            fake_result(
+                "parser",
+                "1.0.0",
+                serde_json::json!({
+                    "name": "parser",
+                    "version": "1.0.0",
+                    "dependencies": { "types": "^1.0.0" },
+                    "peerDependencies": { "types": "*" },
+                }),
+            ),
+        );
+        table.insert(
+            ("types".to_string(), "^1.0.0".to_string()),
+            fake_result(
+                "types",
+                "1.0.0",
+                serde_json::json!({ "name": "types", "version": "1.0.0" }),
+            ),
+        );
+        table
+    }
+
+    #[tokio::test]
+    async fn auto_install_peers_keeps_the_peer_and_drops_the_own_dep() {
+        let resolver = StubResolver { table: parser_table(), calls: Mutex::new(Vec::new()) };
+        let (_tmp, manifest) = fake_manifest(serde_json::json!({ "parser": "^1.0.0" }));
+
+        let tree =
+            resolve_dependency_tree(&resolver, &manifest, [DependencyGroup::Prod], opts(true))
+                .await
+                .unwrap();
+
+        let parser = tree.packages.get("parser@1.0.0").expect("parser resolved");
+        assert!(
+            parser.peer_dependencies.contains_key("types"),
+            "the peer survives when it also appears in the package's own dependencies",
+        );
+        assert!(
+            !tree.packages.contains_key("types@1.0.0"),
+            "the peer-shadowed own dependency is not walked as a child",
+        );
+    }
+
+    #[tokio::test]
+    async fn without_auto_install_peers_the_own_dep_wins() {
+        let resolver = StubResolver { table: parser_table(), calls: Mutex::new(Vec::new()) };
+        let (_tmp, manifest) = fake_manifest(serde_json::json!({ "parser": "^1.0.0" }));
+
+        let tree =
+            resolve_dependency_tree(&resolver, &manifest, [DependencyGroup::Prod], opts(false))
+                .await
+                .unwrap();
+
+        let parser = tree.packages.get("parser@1.0.0").expect("parser resolved");
+        assert!(
+            !parser.peer_dependencies.contains_key("types"),
+            "the peer is dropped when the package supplies the name itself",
+        );
+        assert!(tree.packages.contains_key("types@1.0.0"), "the own dependency is walked");
+    }
+
+    #[tokio::test]
+    async fn non_optional_meta_only_entry_is_not_a_peer() {
+        let mut table = HashMap::new();
+        table.insert(
+            ("pkg".to_string(), "^1.0.0".to_string()),
+            fake_result(
+                "pkg",
+                "1.0.0",
+                serde_json::json!({
+                    "name": "pkg",
+                    "version": "1.0.0",
+                    "peerDependenciesMeta": {
+                        "ghost": {},
+                        "wanted-optional": { "optional": true },
+                    },
+                }),
+            ),
+        );
+        let resolver = StubResolver { table, calls: Mutex::new(Vec::new()) };
+        let (_tmp, manifest) = fake_manifest(serde_json::json!({ "pkg": "^1.0.0" }));
+
+        let tree =
+            resolve_dependency_tree(&resolver, &manifest, [DependencyGroup::Prod], opts(false))
+                .await
+                .unwrap();
+
+        let pkg = tree.packages.get("pkg@1.0.0").expect("pkg resolved");
+        assert!(
+            !pkg.peer_dependencies.contains_key("ghost"),
+            "a peerDependenciesMeta entry without optional: true and without a peerDependencies entry is ignored",
+        );
+        let optional_peer =
+            pkg.peer_dependencies.get("wanted-optional").expect("optional meta-only peer kept");
+        assert!(optional_peer.optional);
+        assert_eq!(optional_peer.version, "*");
+    }
+}
+
+mod level_preferred_versions {
+    use super::{HashMap, Mutex, fake_manifest, fake_result};
+    use crate::resolve_dependency_tree::{ResolveDependencyTreeOptions, resolve_dependency_tree};
+    use pacquet_package_manifest::DependencyGroup;
+    use pacquet_resolving_resolver_base::{
+        LatestQuery, ResolveError, ResolveFuture, ResolveLatestFuture, ResolveOptions,
+        ResolveResult, Resolver, WantedDependency,
+    };
+    use pretty_assertions::assert_eq;
+
+    /// Stub that records, per `(alias, range)`, the overlay's preferred
+    /// versions for the probe package `pinned` at resolve time — the
+    /// name a real picker would merge the overlay under.
+    struct OverlayRecordingResolver {
+        table: HashMap<(String, String), ResolveResult>,
+        seen_overlay: Mutex<HashMap<(String, String), Vec<String>>>,
+    }
+
+    impl Resolver for OverlayRecordingResolver {
+        fn resolve<'a>(
+            &'a self,
+            wanted: &'a WantedDependency,
+            opts: &'a ResolveOptions,
+        ) -> ResolveFuture<'a> {
+            let name = wanted.alias.clone().unwrap_or_default();
+            let range = wanted.bare_specifier.clone().unwrap_or_default();
+            let overlay_view: Vec<String> = opts
+                .preferred_versions_overlay
+                .as_ref()
+                .map(|overlay| {
+                    overlay.versions_for("pinned").into_iter().map(str::to_string).collect()
+                })
+                .unwrap_or_default();
+            self.seen_overlay.lock().unwrap().insert((name.clone(), range.clone()), overlay_view);
+            let result = self.table.get(&(name, range)).cloned();
+            Box::pin(async move { Ok::<_, ResolveError>(result) })
+        }
+
+        fn resolve_latest<'a>(
+            &'a self,
+            _query: &'a LatestQuery,
+            _opts: &'a ResolveOptions,
+        ) -> ResolveLatestFuture<'a> {
+            Box::pin(async { Ok(None) })
+        }
+    }
+
+    /// The varint shape: `parent` pins `pinned@5.0.0` next to
+    /// `consumer`, whose own `pinned: ~5.0.0` child must see the
+    /// sibling-resolved `5.0.0` among its preferred versions —
+    /// upstream's per-level fold
+    /// (resolveDependencies.ts#L717-L746). The importer's own direct
+    /// deps resolve with no overlay.
+    #[tokio::test]
+    async fn child_resolution_prefers_parent_level_sibling_versions() {
+        let mut table = HashMap::new();
+        table.insert(
+            ("parent".to_string(), "1.0.0".to_string()),
+            fake_result(
+                "parent",
+                "1.0.0",
+                serde_json::json!({
+                    "name": "parent",
+                    "version": "1.0.0",
+                    "dependencies": { "consumer": "1.0.0", "pinned": "5.0.0" },
+                }),
+            ),
+        );
+        table.insert(
+            ("consumer".to_string(), "1.0.0".to_string()),
+            fake_result(
+                "consumer",
+                "1.0.0",
+                serde_json::json!({
+                    "name": "consumer",
+                    "version": "1.0.0",
+                    "dependencies": { "pinned": "~5.0.0" },
+                }),
+            ),
+        );
+        for range in ["5.0.0", "~5.0.0"] {
+            table.insert(
+                ("pinned".to_string(), range.to_string()),
+                fake_result(
+                    "pinned",
+                    "5.0.0",
+                    serde_json::json!({ "name": "pinned", "version": "5.0.0" }),
+                ),
+            );
+        }
+        let resolver = OverlayRecordingResolver { table, seen_overlay: Mutex::new(HashMap::new()) };
+        let (_tmp, manifest) = fake_manifest(serde_json::json!({ "parent": "1.0.0" }));
+
+        resolve_dependency_tree(
+            &resolver,
+            &manifest,
+            [DependencyGroup::Prod],
+            ResolveDependencyTreeOptions {
+                base_opts: ResolveOptions::default(),
+                patched_dependencies: None,
+                manifest_hook: None,
+                pnpmfile_hook: None,
+                read_package_log: None,
+                auto_install_peers: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let seen = resolver.seen_overlay.lock().unwrap();
+        assert_eq!(
+            seen.get(&("parent".to_string(), "1.0.0".to_string())),
+            Some(&Vec::new()),
+            "importer-level direct deps resolve with no overlay",
+        );
+        assert_eq!(
+            seen.get(&("pinned".to_string(), "~5.0.0".to_string())),
+            Some(&vec!["5.0.0".to_string()]),
+            "the consumer's child sees its parent-level sibling's resolved version",
+        );
+    }
+
+    /// An `npm:` alias consults the overlay under its *inner* target
+    /// name — the name the npm picker resolves (`spec.name`), not the
+    /// outer alias — mirroring upstream, where the per-level fold keys
+    /// entries by the resolved package name.
+    #[tokio::test]
+    async fn npm_alias_child_consults_overlay_by_inner_name() {
+        let mut table = HashMap::new();
+        table.insert(
+            ("parent".to_string(), "1.0.0".to_string()),
+            fake_result(
+                "parent",
+                "1.0.0",
+                serde_json::json!({
+                    "name": "parent",
+                    "version": "1.0.0",
+                    "dependencies": { "consumer": "1.0.0", "pinned": "5.0.0" },
+                }),
+            ),
+        );
+        table.insert(
+            ("consumer".to_string(), "1.0.0".to_string()),
+            fake_result(
+                "consumer",
+                "1.0.0",
+                serde_json::json!({
+                    "name": "consumer",
+                    "version": "1.0.0",
+                    "dependencies": { "renamed": "npm:pinned@~5.0.0" },
+                }),
+            ),
+        );
+        table.insert(
+            ("pinned".to_string(), "5.0.0".to_string()),
+            fake_result(
+                "pinned",
+                "5.0.0",
+                serde_json::json!({ "name": "pinned", "version": "5.0.0" }),
+            ),
+        );
+        table.insert(
+            ("renamed".to_string(), "npm:pinned@~5.0.0".to_string()),
+            fake_result(
+                "pinned",
+                "5.0.0",
+                serde_json::json!({ "name": "pinned", "version": "5.0.0" }),
+            ),
+        );
+        let resolver = OverlayRecordingResolver { table, seen_overlay: Mutex::new(HashMap::new()) };
+        let (_tmp, manifest) = fake_manifest(serde_json::json!({ "parent": "1.0.0" }));
+
+        resolve_dependency_tree(
+            &resolver,
+            &manifest,
+            [DependencyGroup::Prod],
+            ResolveDependencyTreeOptions {
+                base_opts: ResolveOptions::default(),
+                patched_dependencies: None,
+                manifest_hook: None,
+                pnpmfile_hook: None,
+                read_package_log: None,
+                auto_install_peers: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let seen = resolver.seen_overlay.lock().unwrap();
+        assert_eq!(
+            seen.get(&("renamed".to_string(), "npm:pinned@~5.0.0".to_string())),
+            Some(&vec!["5.0.0".to_string()]),
+            "the npm: alias edge must carry the overlay so the picker can merge by the inner name",
+        );
+    }
+}
+
+mod cycle_edges {
+    use super::{
+        DependencyGroup, HashMap, Mutex, ResolveDependencyTreeOptions, ResolveOptions,
+        StubResolver, fake_manifest, fake_result, resolve_dependency_tree,
+    };
+    use crate::resolve_peers::{ResolvePeersOptions, resolve_peers};
+
+    /// A two-package cycle keeps its closing edge: pnpm's `buildTree`
+    /// gate drops only the *second* lap of a cycle, so `b`'s snapshot
+    /// still lists `a` (upstream restores the repeated node's pruned
+    /// children via the previously-resolved-children merge).
+    #[tokio::test]
+    async fn cycle_closing_edge_reaches_the_graph() {
+        let mut table = HashMap::new();
+        table.insert(
+            ("a".to_string(), "1.0.0".to_string()),
+            fake_result(
+                "a",
+                "1.0.0",
+                serde_json::json!({
+                    "name": "a",
+                    "version": "1.0.0",
+                    "dependencies": { "b": "1.0.0" },
+                }),
+            ),
+        );
+        table.insert(
+            ("b".to_string(), "1.0.0".to_string()),
+            fake_result(
+                "b",
+                "1.0.0",
+                serde_json::json!({
+                    "name": "b",
+                    "version": "1.0.0",
+                    "dependencies": { "a": "1.0.0" },
+                }),
+            ),
+        );
+        let resolver = StubResolver { table, calls: Mutex::new(Vec::new()) };
+        let (_tmp, manifest) = fake_manifest(serde_json::json!({ "a": "1.0.0" }));
+
+        let mut tree = resolve_dependency_tree(
+            &resolver,
+            &manifest,
+            [DependencyGroup::Prod],
+            ResolveDependencyTreeOptions {
+                base_opts: ResolveOptions::default(),
+                patched_dependencies: None,
+                manifest_hook: None,
+                pnpmfile_hook: None,
+                read_package_log: None,
+                auto_install_peers: false,
+            },
+        )
+        .await
+        .unwrap();
+        let result = resolve_peers(&mut tree, ResolvePeersOptions::default());
+
+        let a_node =
+            result.graph.get(&crate::DepPath::from("a@1.0.0".to_string())).expect("a in graph");
+        assert!(a_node.children.contains_key("b"), "a keeps its b edge");
+        let b_node =
+            result.graph.get(&crate::DepPath::from("b@1.0.0".to_string())).expect("b in graph");
+        assert!(
+            b_node.children.contains_key("a"),
+            "the cycle-closing edge b -> a must reach the graph: {:?}",
+            b_node.children.keys().collect::<Vec<_>>(),
         );
     }
 }

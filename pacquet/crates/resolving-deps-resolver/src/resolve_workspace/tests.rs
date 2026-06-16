@@ -8,10 +8,11 @@
 use std::{collections::HashMap, str::FromStr, sync::Mutex};
 
 use chrono::{DateTime, TimeZone, Utc};
+use pacquet_lockfile::{DirectoryResolution, LockfileResolution};
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use pacquet_resolving_resolver_base::{
-    LatestQuery, PreferredVersions, ResolveError, ResolveFuture, ResolveLatestFuture,
-    ResolveOptions, ResolveResult, Resolver, WantedDependency,
+    LatestQuery, PkgResolutionId, PreferredVersions, ResolveError, ResolveFuture,
+    ResolveLatestFuture, ResolveOptions, ResolveResult, Resolver, WantedDependency,
 };
 use pretty_assertions::assert_eq;
 
@@ -59,6 +60,55 @@ impl Resolver for RecordingResolver {
     }
 }
 
+struct ProjectRelativeWorkspaceResolver {
+    target_dir: std::path::PathBuf,
+}
+
+impl Resolver for ProjectRelativeWorkspaceResolver {
+    fn resolve<'a>(
+        &'a self,
+        wanted: &'a WantedDependency,
+        opts: &'a ResolveOptions,
+    ) -> ResolveFuture<'a> {
+        let alias = wanted.alias.clone().unwrap_or_default();
+        let range = wanted.bare_specifier.clone().unwrap_or_default();
+        let target_dir = self.target_dir.clone();
+        let project_dir = opts.project_dir.clone();
+        Box::pin(async move {
+            if alias != "shared" || range != "^1.0.0" {
+                return Ok(None);
+            }
+            let rel = pathdiff::diff_paths(&target_dir, &project_dir)
+                .expect("target can be relativized")
+                .display()
+                .to_string()
+                .replace('\\', "/");
+            Ok(Some(ResolveResult {
+                id: PkgResolutionId::from(format!("link:{rel}")),
+                name_ver: None,
+                latest: None,
+                published_at: None,
+                manifest: Some(std::sync::Arc::new(
+                    serde_json::json!({ "name": "shared", "version": "1.0.0" }),
+                )),
+                resolution: LockfileResolution::Directory(DirectoryResolution { directory: rel }),
+                resolved_via: "workspace".to_string(),
+                normalized_bare_specifier: None,
+                alias: Some(alias),
+                policy_violation: None,
+            }))
+        })
+    }
+
+    fn resolve_latest<'a>(
+        &'a self,
+        _query: &'a LatestQuery,
+        _opts: &'a ResolveOptions,
+    ) -> ResolveLatestFuture<'a> {
+        Box::pin(async { Ok(None) })
+    }
+}
+
 fn fake_result(
     name: &str,
     version: &str,
@@ -89,6 +139,10 @@ fn fake_result(
     }
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "test helper called from multiple sites with owned literals; by-value keeps the call sites clean"
+)]
 fn fake_manifest(deps: serde_json::Value) -> (tempfile::TempDir, PackageManifest) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("package.json");
@@ -127,6 +181,8 @@ fn workspace_opts(pick_lowest_direct: bool, time_based: bool) -> WorkspaceResolv
     WorkspaceResolveOptions {
         dedupe_peers: false,
         dedupe_injected_deps: false,
+        dedupe_peer_dependents: false,
+        resolve_peers_from_workspace_root: false,
         exclude_links_from_lockfile: false,
         lockfile_dir: std::path::PathBuf::from("/lockfile-dir"),
         peers_suffix_max_length: 1000,
@@ -137,7 +193,130 @@ fn workspace_opts(pick_lowest_direct: bool, time_based: bool) -> WorkspaceResolv
         time_based,
         wanted_lockfile: None,
         update_reuse_scope: crate::UpdateReuseScope::All,
+        auto_install_peers: false,
+        registries: HashMap::new(),
     }
+}
+
+#[tokio::test]
+async fn workspace_link_results_are_cached_per_importer_project_dir() {
+    let (_a_tmp, a_manifest) = fake_manifest(serde_json::json!({ "shared": "^1.0.0" }));
+    let (_b_tmp, b_manifest) = fake_manifest(serde_json::json!({ "shared": "^1.0.0" }));
+    let resolver = ProjectRelativeWorkspaceResolver {
+        target_dir: std::path::PathBuf::from("/repo/packages/shared"),
+    };
+    let importers = vec![
+        WorkspaceImporter { id: "packages/a".to_string(), manifest: &a_manifest },
+        WorkspaceImporter { id: "apps/b".to_string(), manifest: &b_manifest },
+    ];
+
+    let result = resolve_workspace(
+        &resolver,
+        &importers,
+        &[DependencyGroup::Prod],
+        workspace_opts(false, false),
+        |importer| {
+            let project_dir = match importer.id.as_str() {
+                "packages/a" => std::path::PathBuf::from("/repo/packages/a"),
+                "apps/b" => std::path::PathBuf::from("/repo/apps/b"),
+                _ => unreachable!("unexpected importer"),
+            };
+            let mut opts = importer_opts(project_dir, None);
+            opts.base_opts.always_try_workspace_packages = true;
+            opts.base_opts.workspace_packages = Some(std::collections::BTreeMap::default());
+            opts
+        },
+    )
+    .await
+    .expect("resolve workspace");
+
+    assert_eq!(
+        result.peers.direct_dependencies_by_importer["packages/a"]["shared"].as_str(),
+        "link:../shared",
+    );
+    assert_eq!(
+        result.peers.direct_dependencies_by_importer["apps/b"]["shared"].as_str(),
+        "link:../../packages/shared",
+    );
+}
+
+#[tokio::test]
+async fn workspace_root_direct_deps_resolve_child_importer_peers() {
+    let (_root_tmp, root_manifest) = fake_manifest(serde_json::json!({
+        "typescript": "~5.9.3",
+    }));
+    let (_app_tmp, app_manifest) = fake_manifest(serde_json::json!({
+        "rollup": "^4.0.0",
+        "plugin": "^1.0.0",
+    }));
+    let mut table = HashMap::new();
+    table.insert(
+        ("typescript".to_string(), "~5.9.3".to_string()),
+        fake_result(
+            "typescript",
+            "5.9.3",
+            None,
+            serde_json::json!({ "name": "typescript", "version": "5.9.3" }),
+        ),
+    );
+    table.insert(
+        ("typescript".to_string(), "5.9.3".to_string()),
+        fake_result(
+            "typescript",
+            "5.9.3",
+            None,
+            serde_json::json!({ "name": "typescript", "version": "5.9.3" }),
+        ),
+    );
+    table.insert(
+        ("rollup".to_string(), "^4.0.0".to_string()),
+        fake_result(
+            "rollup",
+            "4.0.0",
+            None,
+            serde_json::json!({ "name": "rollup", "version": "4.0.0" }),
+        ),
+    );
+    table.insert(
+        ("plugin".to_string(), "^1.0.0".to_string()),
+        fake_result(
+            "plugin",
+            "1.0.0",
+            None,
+            serde_json::json!({
+                "name": "plugin",
+                "version": "1.0.0",
+                "peerDependencies": {
+                    "rollup": "^4.0.0",
+                    "typescript": "^5.0.0"
+                }
+            }),
+        ),
+    );
+    let resolver = RecordingResolver { table, seen: Mutex::new(HashMap::new()) };
+    let importers = vec![
+        WorkspaceImporter { id: ".".to_string(), manifest: &root_manifest },
+        WorkspaceImporter { id: "packages/app".to_string(), manifest: &app_manifest },
+    ];
+    let mut opts = workspace_opts(false, false);
+    opts.resolve_peers_from_workspace_root = true;
+
+    let result =
+        resolve_workspace(&resolver, &importers, &[DependencyGroup::Prod], opts, |importer| {
+            let project_dir = match importer.id.as_str() {
+                "." => std::path::PathBuf::from("/repo"),
+                "packages/app" => std::path::PathBuf::from("/repo/packages/app"),
+                _ => unreachable!("unexpected importer"),
+            };
+            importer_opts(project_dir, None)
+        })
+        .await
+        .expect("resolve workspace");
+
+    assert_eq!(
+        result.peers.direct_dependencies_by_importer["packages/app"]["plugin"].as_str(),
+        "plugin@1.0.0(rollup@4.0.0)(typescript@5.9.3)",
+    );
 }
 
 /// time-based: the subdep cutoff is the newest direct-dep publication
@@ -284,4 +463,197 @@ async fn lowest_direct_applies_no_publish_cutoff() {
         (false, None),
         "no time-based cutoff in lowest-direct mode",
     );
+}
+
+/// A package shared across importers keeps the children missing-peer
+/// report from the importer that resolved it first, so a later importer
+/// never hoists an optional peer declared inside that shared subtree.
+/// The final workspace-wide peer pass still uses each importer's actual
+/// provider context, so an importer without the provider gets the
+/// peerless variant instead of reusing the first importer's suffixed
+/// variant.
+#[tokio::test]
+async fn shared_subtree_owner_context_suppresses_later_optional_hoist() {
+    let mut table = HashMap::new();
+    table.insert(
+        ("shared".to_string(), "1.0.0".to_string()),
+        fake_result(
+            "shared",
+            "1.0.0",
+            None,
+            serde_json::json!({
+                "name": "shared",
+                "version": "1.0.0",
+                "dependencies": { "mid": "1.0.0" },
+            }),
+        ),
+    );
+    table.insert(
+        ("mid".to_string(), "1.0.0".to_string()),
+        fake_result(
+            "mid",
+            "1.0.0",
+            None,
+            serde_json::json!({
+                "name": "mid",
+                "version": "1.0.0",
+                "peerDependencies": { "opt": "*" },
+                "peerDependenciesMeta": { "opt": { "optional": true } },
+            }),
+        ),
+    );
+    for version in ["18.0.0", "25.0.0"] {
+        table.insert(
+            ("opt".to_string(), version.to_string()),
+            fake_result(
+                "opt",
+                version,
+                None,
+                serde_json::json!({ "name": "opt", "version": version }),
+            ),
+        );
+    }
+    // `carrier` puts `opt@25.0.0` into the run-resolved preferred
+    // versions during the root importer's walk — deep enough that it
+    // is not in any peer scope — so a later hoist would pick it as the
+    // max satisfying version.
+    table.insert(
+        ("carrier".to_string(), "1.0.0".to_string()),
+        fake_result(
+            "carrier",
+            "1.0.0",
+            None,
+            serde_json::json!({
+                "name": "carrier",
+                "version": "1.0.0",
+                "dependencies": { "opt": "25.0.0" },
+            }),
+        ),
+    );
+    let resolver = RecordingResolver { table, seen: Mutex::new(HashMap::new()) };
+    let (tmp_root, root_manifest) = fake_manifest(
+        serde_json::json!({ "shared": "1.0.0", "opt": "18.0.0", "carrier": "1.0.0" }),
+    );
+    let (tmp_a, a_manifest) = fake_manifest(serde_json::json!({ "shared": "1.0.0" }));
+    let importers = [
+        WorkspaceImporter { id: ".".to_string(), manifest: &root_manifest },
+        WorkspaceImporter { id: "pkg-a".to_string(), manifest: &a_manifest },
+    ];
+    let dirs = [tmp_root.path(), tmp_a.path()];
+
+    let mut opts = workspace_opts(false, false);
+    opts.auto_install_peers = true;
+    let mut next = 0;
+    let result = resolve_workspace(&resolver, &importers, &[DependencyGroup::Prod], opts, |_| {
+        let dir = dirs[next].to_path_buf();
+        next += 1;
+        let mut opts = importer_opts(dir, None);
+        opts.auto_install_peers = true;
+        opts
+    })
+    .await
+    .unwrap();
+
+    let root_direct = result.peers.direct_dependencies_by_importer.get(".").expect("root importer");
+    assert_eq!(
+        root_direct.get("shared").map(std::string::ToString::to_string),
+        Some("shared@1.0.0(opt@18.0.0)".to_string()),
+    );
+    let a_direct =
+        result.peers.direct_dependencies_by_importer.get("pkg-a").expect("pkg-a importer");
+    assert_eq!(
+        a_direct.get("shared").map(std::string::ToString::to_string),
+        Some("shared@1.0.0".to_string()),
+        "pkg-a must not hoist opt, but it also must not reuse root's opt provider",
+    );
+}
+
+/// The reverse of the sharing case above: when the first importer's
+/// walk could NOT satisfy the optional peer either (it only hoisted it
+/// later), the miss stays visible to every importer — each hoists its
+/// own copy, so the shared subtree carries the peer suffix under both
+/// (pnpm 11.6.0 behaviour for e.g. `clipanion`'s `typanion` under
+/// importers that share `@yarnpkg/*` chains with the root).
+#[tokio::test]
+async fn shared_subtree_miss_unsatisfied_by_first_importer_still_hoists() {
+    let mut table = HashMap::new();
+    table.insert(
+        ("top".to_string(), "1.0.0".to_string()),
+        fake_result(
+            "top",
+            "1.0.0",
+            None,
+            serde_json::json!({
+                "name": "top",
+                "version": "1.0.0",
+                "dependencies": { "mid": "1.0.0", "carrier": "1.0.0" },
+            }),
+        ),
+    );
+    table.insert(
+        ("mid".to_string(), "1.0.0".to_string()),
+        fake_result(
+            "mid",
+            "1.0.0",
+            None,
+            serde_json::json!({
+                "name": "mid",
+                "version": "1.0.0",
+                "peerDependencies": { "opt": "*" },
+                "peerDependenciesMeta": { "opt": { "optional": true } },
+            }),
+        ),
+    );
+    table.insert(
+        ("carrier".to_string(), "1.0.0".to_string()),
+        fake_result(
+            "carrier",
+            "1.0.0",
+            None,
+            serde_json::json!({
+                "name": "carrier",
+                "version": "1.0.0",
+                "dependencies": { "opt": "25.0.0" },
+            }),
+        ),
+    );
+    table.insert(
+        ("opt".to_string(), "25.0.0".to_string()),
+        fake_result(
+            "opt",
+            "25.0.0",
+            None,
+            serde_json::json!({ "name": "opt", "version": "25.0.0" }),
+        ),
+    );
+    let resolver = RecordingResolver { table, seen: Mutex::new(HashMap::new()) };
+    let (tmp_root, root_manifest) = fake_manifest(serde_json::json!({ "top": "1.0.0" }));
+    let (tmp_a, a_manifest) = fake_manifest(serde_json::json!({ "top": "1.0.0" }));
+    let importers = [
+        WorkspaceImporter { id: ".".to_string(), manifest: &root_manifest },
+        WorkspaceImporter { id: "pkg-a".to_string(), manifest: &a_manifest },
+    ];
+    let dirs = [tmp_root.path(), tmp_a.path()];
+
+    let mut opts = workspace_opts(false, false);
+    opts.auto_install_peers = true;
+    let mut next = 0;
+    let result = resolve_workspace(&resolver, &importers, &[DependencyGroup::Prod], opts, |_| {
+        let dir = dirs[next].to_path_buf();
+        next += 1;
+        let mut opts = importer_opts(dir, None);
+        opts.auto_install_peers = true;
+        opts
+    })
+    .await
+    .unwrap();
+
+    for importer in [".", "pkg-a"] {
+        let direct = result.peers.direct_dependencies_by_importer.get(importer).expect("importer");
+        assert_eq!(
+            direct.get("top").map(std::string::ToString::to_string),
+            Some("top@1.0.0(opt@25.0.0)".to_string()),
+            "{importer} hoists the peer the first walk could not satisfy",
+        );
+    }
 }

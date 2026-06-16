@@ -224,6 +224,23 @@ fn build_side_effects_maps(
         let mut overlay: FilesMap = HashMap::with_capacity(base_files.len());
         if let Some(added) = added {
             for (filename, info) in added {
+                // The overlay map is later joined onto the package
+                // directory and written during import, so a poisoned /
+                // corrupted index row (store integrity is explicitly not
+                // a tamper boundary — see `verify_file`) could otherwise
+                // escape the slot via a `..` or absolute `added` key.
+                // Drop the whole `cache_key` entry on any unsafe path so
+                // the importer falls back to a rebuild, matching the
+                // malformed-digest handling below.
+                if !is_safe_overlay_path(&filename) {
+                    tracing::debug!(
+                        target: "pacquet::store_index",
+                        ?filename,
+                        cache_key,
+                        "unsafe path in side-effects `added` overlay; dropping this cache_key entry entirely so the importer falls back to rebuild",
+                    );
+                    continue 'next_key;
+                }
                 let Some(path) = store_dir.cas_file_path_by_mode(&info.digest, info.mode) else {
                     // Skip the entire `cache_key` entry rather than
                     // returning a partial overlay. A future importer
@@ -261,6 +278,22 @@ fn build_side_effects_maps(
     Some(out)
 }
 
+/// Whether `filename` is a safe package-relative path to write under the
+/// package slot. Rejects absolute paths, any `..` component, and `\`
+/// separators (which are `Normal` components on Unix but path separators
+/// on Windows). Mirrors the path-traversal guard the tarball extractor
+/// applies to archive entries — the side-effects overlay reaches the same
+/// `dir.join(key)` import, so the same rule applies to a store row that
+/// can't be trusted not to have been tampered with.
+fn is_safe_overlay_path(filename: &str) -> bool {
+    use std::path::Component;
+    if filename.is_empty() || filename.contains('\\') {
+        return false;
+    }
+    let path = Path::new(filename);
+    path.components().all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+}
+
 /// Port of pnpm's `verifyFile`. `true` when the on-disk file is either
 /// unmodified since the last verified check or modified but still
 /// content-hashes to the stored digest.
@@ -269,6 +302,10 @@ fn build_side_effects_maps(
 /// doesn't affect behaviour, only the `debug!` log when verification
 /// fails, so operators can see *which* package file invalidated the
 /// store-index row in the log.
+///
+/// **Trust boundary.** This verification is for corruption detection
+/// in a trusted local store. It is not a tamper boundary for a store
+/// writable by untrusted users or jobs.
 ///
 /// **Locking discipline.** The fast path (`is_modified == false`, i.e.
 /// the file's mtime is within 100 ms of the recorded `checked_at`)
@@ -309,7 +346,7 @@ fn verify_file(path: &Path, filename: &str, info: &CafsFileInfo, algo: &str) -> 
     // here — the lock cost only applies to files actually being
     // re-verified, which is rare.
     let lock = pacquet_fs::cas_write_lock(path);
-    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
     // Re-stat under the lock. The writer (if any) has finished by
     // now, so the size + mtime reflect the committed state. A file
@@ -409,9 +446,13 @@ fn remove_stale_cafs_entry(path: &Path) {
 /// first time an old-format row is read (same as pnpm's `?? 0`).
 fn check_file(path: &Path, checked_at: Option<u64>) -> Option<(bool, u64)> {
     let meta = fs::metadata(path).ok()?;
-    let mtime_ms =
-        meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_millis().min(u64::MAX as u128)
-            as u64;
+    let mtime_ms = meta
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64;
     let baseline = checked_at.unwrap_or(0);
     let is_modified = mtime_ms.saturating_sub(baseline) > 100;
     Some((is_modified, meta.len()))
@@ -444,7 +485,7 @@ fn verify_file_integrity(path: &Path, digest: &str, algo: &str) -> bool {
     };
     let mut reader = BufReader::with_capacity(64 * 1024, file);
     let mut hasher = Sha512::new();
-    let mut buf = [0u8; 64 * 1024];
+    let mut buf = vec![0u8; 64 * 1024];
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break,

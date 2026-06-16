@@ -17,6 +17,7 @@ use std::collections::HashMap;
 
 use derive_more::{Display, Error};
 use miette::Diagnostic;
+pub use pacquet_lockfile::pick_registry_for_package;
 use reqwest::Url;
 
 /// Built-in named-registry aliases the resolver recognizes
@@ -91,6 +92,7 @@ fn is_valid_http_url(url: &str) -> bool {
 /// - Output is sorted longest-first so two registries sharing a host
 ///   but differing by path (`https://npm/team-a/` vs
 ///   `https://npm/team-b/`) route to the deeper match.
+#[must_use]
 pub fn build_named_registry_prefixes(named_registries: &HashMap<String, String>) -> Vec<String> {
     let mut merged: HashMap<&str, String> = HashMap::new();
     for (name, url) in BUILTIN_NAMED_REGISTRIES {
@@ -130,6 +132,7 @@ pub fn build_named_registry_prefixes(named_registries: &HashMap<String, String>)
 ///    the `registries[@scope]` entry if present, else
 ///    `registries.default`. Ports upstream's
 ///    [`pickRegistryForPackage`](https://github.com/pnpm/pnpm/blob/2a9bd897bf/config/pick-registry-for-package/src/index.ts#L3-L6).
+#[must_use]
 pub fn pick_registry_for_version(
     registries: &HashMap<String, String>,
     named_registry_prefixes: &[String],
@@ -148,43 +151,6 @@ pub fn pick_registry_for_version(
         }
     }
     pick_registry_for_package(registries, name, None)
-}
-
-/// Default-vs-scope routing for an npm package. Mirrors pnpm's
-/// [`pickRegistryForPackage`](https://github.com/pnpm/pnpm/blob/main/config/pick-registry-for-package/src/index.ts).
-///
-/// Routing rules:
-///
-/// 1. **`npm:` alias.** When `bare_specifier` is an `npm:` alias the
-///    *alias target* decides routing, not the local key:
-///    - `npm:@scope/name@<spec>` → `registries[@scope]`.
-///    - `npm:name@<spec>` (unscoped target) → `registries["default"]`,
-///      never the local alias's scope, because the fetched package is
-///      unscoped and doesn't live on a scoped registry.
-/// 2. **Plain spec.** Falls back to `pkg_name`'s scope when present;
-///    otherwise `registries["default"]`.
-pub fn pick_registry_for_package(
-    registries: &HashMap<String, String>,
-    pkg_name: &str,
-    bare_specifier: Option<&str>,
-) -> String {
-    let scope = match bare_specifier.and_then(|spec| spec.strip_prefix("npm:")) {
-        Some(target) => scope_of(target),
-        None => scope_of(pkg_name),
-    };
-    if let Some(scope) = scope
-        && let Some(url) = registries.get(scope)
-    {
-        return url.clone();
-    }
-    registries.get("default").cloned().unwrap_or_default()
-}
-
-fn scope_of(name: &str) -> Option<&str> {
-    if !name.starts_with('@') {
-        return None;
-    }
-    name.find('/').map(|sep| &name[..sep])
 }
 
 #[cfg(test)]

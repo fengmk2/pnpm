@@ -11,6 +11,7 @@ use pacquet_crypto_hash::create_short_hash;
 use pacquet_fs::force_symlink_dir;
 use pacquet_package_is_installable::SupportedArchitectures;
 use pacquet_package_manifest::DependencyGroup;
+use pacquet_registry::PinnedVersion;
 use pacquet_reporter::Reporter;
 use pacquet_resolving_parse_wanted_dependency::parse_wanted_dependency;
 use serde_json::{Value, json};
@@ -195,9 +196,10 @@ impl DlxArgs {
             .wrap_err("canonicalizing the dlx cache directory")?;
         let cache_link = dlx_command_cache_dir.join("pkg");
 
-        let cached_dir = match get_valid_cache_dir(&cache_link, max_age, SystemTime::now()) {
-            Some(dir) => dir,
-            None => {
+        let cached_dir =
+            if let Some(dir) = get_valid_cache_dir(&cache_link, max_age, SystemTime::now()) {
+                dir
+            } else {
                 let prepare_dir =
                     get_prepare_dir(&dlx_command_cache_dir, SystemTime::now(), std::process::id());
                 if let Err(error) = install_into_cache::<Reporter>(
@@ -221,8 +223,7 @@ impl DlxArgs {
                 // ignore the failure and run from our own prepare dir.
                 let _ = force_symlink_dir(&prepare_dir, &cache_link);
                 prepare_dir
-            }
-        };
+            };
 
         let bins_dir = cached_dir.join("node_modules").join(".bin");
         let bin_name =
@@ -299,7 +300,10 @@ async fn install_into_cache<Reporter: self::Reporter + 'static>(
         add_package::<Reporter, _, _>(
             state,
             pkg,
-            false,
+            // dlx records the default caret range; the spec is throwaway.
+            PinnedVersion::default(),
+            // dlx never catalogs.
+            None,
             // dlx must download to run the bin, so never lockfile-only.
             false,
             config.supported_architectures.clone(),
@@ -355,6 +359,10 @@ fn run_bin(
     let status =
         cmd.status().map_err(|source| DlxError::Spawn { command: bin_name.to_string(), source })?;
     if !status.success() {
+        #[expect(
+            clippy::exit,
+            reason = "dlx propagates the spawned command's exit status, like pnpm"
+        )]
         std::process::exit(status.code().unwrap_or(1));
     }
     Ok(())
@@ -363,8 +371,7 @@ fn run_bin(
 /// Build the `{ "default": registry, <alias>: url, … }` map pnpm feeds
 /// into the cache key. Mirrors `registries_map` in dlx.ts.
 fn build_registries_map(config: &Config) -> BTreeMap<String, String> {
-    let mut map = BTreeMap::new();
-    map.insert("default".to_string(), config.registry.clone());
+    let mut map = config.resolved_registries();
     for (name, url) in &config.named_registries {
         map.insert(name.clone(), url.clone());
     }
@@ -443,7 +450,7 @@ fn get_valid_cache_dir(
 /// prepared in. Ports `getPrepareDir`
 /// (<https://github.com/pnpm/pnpm/blob/d4a2b0364c/exec/commands/src/dlx.ts#L433-L436>).
 fn get_prepare_dir(cache_path: &Path, now: SystemTime, pid: u32) -> PathBuf {
-    let millis = now.duration_since(UNIX_EPOCH).map(|elapsed| elapsed.as_millis()).unwrap_or(0);
+    let millis = now.duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_millis());
     cache_path.join(format!("{millis:x}-{pid:x}"))
 }
 
@@ -501,7 +508,7 @@ fn read_json(path: &Path) -> Result<Value, DlxError> {
 /// (dlx.ts:297-302).
 fn scopeless(pkg_name: &str) -> &str {
     if let Some(rest) = pkg_name.strip_prefix('@') {
-        rest.split_once('/').map(|(_, name)| name).unwrap_or(pkg_name)
+        rest.split_once('/').map_or(pkg_name, |(_, name)| name)
     } else {
         pkg_name
     }

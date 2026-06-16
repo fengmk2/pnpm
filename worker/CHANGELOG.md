@@ -1,5 +1,63 @@
 # @pnpm/worker
 
+## 1100.2.0
+
+### Minor Changes
+
+- 61810aa: Added a new setting `frozenStore` (`--frozen-store`) that lets `pnpm install` run against a package store on a read-only filesystem (e.g. a Nix store, a read-only bind mount, an OCI layer). When enabled, pnpm opens the store's SQLite `index.db` through the `immutable=1` URI — bypassing the WAL/`-shm` sidecar creation that otherwise fails on a read-only directory — and suppresses every store-write path (the `index.db` writer and the project-registry write). Pair it with `--offline --frozen-lockfile` against a fully-populated store. Under the global virtual store, package directories live inside the store, so if the store is missing the build output of a package whose lifecycle scripts are approved (or that has a patch), pnpm fails up front with `ERR_PNPM_FROZEN_STORE_NEEDS_BUILD` rather than crashing mid-build on a read-only write — seed the store with those builds first. Incompatible with `--force` and with a configured pnpr server, since both write into the store; the side-effects cache is likewise not written under `frozenStore`. If the store is missing its content directory, the install fails fast with `ERR_PNPM_FROZEN_STORE_INCOMPLETE` rather than attempting to initialize it. The read-only `immutable=1` open requires Node.js >=22.15.0, >=23.11.0, or >=24.0.0; on older runtimes `--frozen-store` fails with a clear `ERR_PNPM_FROZEN_STORE_UNSUPPORTED_NODE` error. Bin-linking also tolerates a read-only store: under the global virtual store a package's bin source lives inside the store, so the `chmod` that makes it executable would be refused — with `EPERM`/`EACCES`, or with `EROFS` on a genuinely read-only filesystem. That `chmod` is redundant when the seed already ships its bins executable with a normalized shebang, so it is now skipped in that case, while a non-executable bin (or one still carrying a Windows CRLF shebang) on a read-only store still errors.
+
+### Patch Changes
+
+- a31faa7: Updated dependency ranges. Notably:
+
+  - `@pnpm/logger` peer dependency range moved to `^1100.0.0`.
+  - `msgpackr` 1.11.8 → 2.0.4 (store index files remain byte-compatible in both directions).
+  - `open` ^7.4.2 → ^11.0.0, `memoize` ^10 → ^11, `cli-truncate` ^5 → ^6, `pidtree` ^0.6 → ^1.
+  - `@yarnpkg/core` 4.5.0 → 4.8.0, `@rushstack/worker-pool` 0.7.7 → 0.7.18, `@cyclonedx/cyclonedx-library` 10.0.0 → 10.1.0, `@pnpm/config.nerf-dart` ^1 → ^2, `@pnpm/log.group` 3.0.2 → 4.0.1, `@pnpm/util.lex-comparator` ^3 → ^4.
+
+- Updated dependencies [f648e9b]
+- Updated dependencies [61810aa]
+- Updated dependencies [a31faa7]
+  - @pnpm/fs.symlink-dependency@1100.0.10
+  - @pnpm/store.index@1100.2.0
+  - @pnpm/fs.hard-link-dir@1100.0.2
+  - @pnpm/store.cafs@1100.1.10
+  - @pnpm/store.create-cafs-store@1100.0.14
+  - @pnpm/building.pkg-requires-build@1100.0.8
+  - @pnpm/store.cafs-types@1100.0.1
+
+## 1100.1.11
+
+### Patch Changes
+
+- @pnpm/fs.symlink-dependency@1100.0.9
+- @pnpm/store.create-cafs-store@1100.0.13
+- @pnpm/fs.hard-link-dir@1100.0.1
+
+## 1100.1.10
+
+### Patch Changes
+
+- 089484a: The pnpr install accelerator is now used only to create the lockfile. Previously `POST /v1/install` returned the resolved lockfile **and** all missing file contents inline over a single connection, which was bandwidth-bound on cold/WAN installs (one TCP stream can't compete with a registry's parallel CDN fetches). The accelerator is now a two-phase flow: the pnpr server resolves and verifies the lockfile server-side (collapsing resolution's round-trip depth), then the client fetches every tarball directly from the registries in parallel, exactly like a normal install. This makes the accelerated path never slower than a plain install, and turns pnpr into a stateless resolver that stores no tarballs and serves no file content [#12230](https://github.com/pnpm/pnpm/issues/12230).
+  - @pnpm/building.pkg-requires-build@1100.0.7
+  - @pnpm/fs.symlink-dependency@1100.0.8
+  - @pnpm/store.cafs@1100.1.9
+  - @pnpm/store.cafs-types@1100.0.1
+  - @pnpm/fs.hard-link-dir@1100.0.1
+  - @pnpm/store.create-cafs-store@1100.0.12
+
+## 1100.1.9
+
+### Patch Changes
+
+- 3b76b8e: The pnpr install accelerator now serves resolved files only in the single gzipped `POST /v1/install` response and authorizes every package whose bytes it serves against the server's access policy. The separate unauthenticated `POST /v1/files` endpoint has been removed: the client materializes the inlined files straight into its content-addressable store, and a content-addressed digest is no longer a bearer capability for a package the caller cannot read.
+  - @pnpm/store.create-cafs-store@1100.0.11
+  - @pnpm/building.pkg-requires-build@1100.0.6
+  - @pnpm/fs.symlink-dependency@1100.0.7
+  - @pnpm/store.cafs@1100.1.8
+  - @pnpm/store.cafs-types@1100.0.1
+  - @pnpm/fs.hard-link-dir@1100.0.1
+
 ## 1100.1.8
 
 ### Patch Changes

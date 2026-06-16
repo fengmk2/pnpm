@@ -1,5 +1,62 @@
 # @pnpm/engine.runtime.commands
 
+## 1100.1.5
+
+### Patch Changes
+
+- a31faa7: Updated dependency ranges. Notably:
+
+  - `@pnpm/logger` peer dependency range moved to `^1100.0.0`.
+  - `msgpackr` 1.11.8 → 2.0.4 (store index files remain byte-compatible in both directions).
+  - `open` ^7.4.2 → ^11.0.0, `memoize` ^10 → ^11, `cli-truncate` ^5 → ^6, `pidtree` ^0.6 → ^1.
+  - `@yarnpkg/core` 4.5.0 → 4.8.0, `@rushstack/worker-pool` 0.7.7 → 0.7.18, `@cyclonedx/cyclonedx-library` 10.0.0 → 10.1.0, `@pnpm/config.nerf-dart` ^1 → ^2, `@pnpm/log.group` 3.0.2 → 4.0.1, `@pnpm/util.lex-comparator` ^3 → ^4.
+
+- Updated dependencies [61810aa]
+- Updated dependencies [681b593]
+- Updated dependencies [a31faa7]
+  - @pnpm/config.reader@1101.9.0
+  - @pnpm/cli.utils@1101.0.12
+  - @pnpm/engine.runtime.node-resolver@1101.1.7
+  - @pnpm/network.fetch@1100.1.3
+
+## 1100.1.4
+
+### Patch Changes
+
+- Updated dependencies [bc9ed78]
+- Updated dependencies [615c669]
+  - @pnpm/config.reader@1101.8.0
+  - @pnpm/engine.runtime.node-resolver@1101.1.6
+  - @pnpm/network.fetch@1100.1.2
+  - @pnpm/cli.utils@1101.0.11
+
+## 1100.1.3
+
+### Patch Changes
+
+- Updated dependencies [822beb5]
+- Updated dependencies [3537020]
+- Updated dependencies [894ea6a]
+- Updated dependencies [6b5d91a]
+- Updated dependencies [027196b]
+- Updated dependencies [1017c36]
+- Updated dependencies [3d50680]
+  - @pnpm/config.reader@1101.7.0
+  - @pnpm/engine.runtime.node-resolver@1101.1.5
+  - @pnpm/cli.utils@1101.0.10
+  - @pnpm/network.fetch@1100.1.1
+
+## 1100.1.2
+
+### Patch Changes
+
+- Updated dependencies [60a1eec]
+- Updated dependencies [a017bf3]
+  - @pnpm/network.fetch@1100.1.0
+  - @pnpm/config.reader@1101.6.0
+  - @pnpm/engine.runtime.node-resolver@1101.1.4
+  - @pnpm/cli.utils@1101.0.9
+
 ## 1100.1.1
 
 ### Patch Changes

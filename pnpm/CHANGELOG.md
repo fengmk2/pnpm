@@ -1,5 +1,140 @@
 # pnpm
 
+## 11.7.0
+
+### Minor Changes
+
+- Added a new setting `frozenStore` (`--frozen-store`) that lets `pnpm install` run against a package store on a read-only filesystem (e.g. a Nix store, a read-only bind mount, an OCI layer). When enabled, pnpm opens the store's SQLite `index.db` through the `immutable=1` URI — bypassing the WAL/`-shm` sidecar creation that otherwise fails on a read-only directory — and suppresses every store-write path (the `index.db` writer and the project-registry write). Pair it with `--offline --frozen-lockfile` against a fully-populated store. Under the global virtual store, package directories live inside the store, so if the store is missing the build output of a package whose lifecycle scripts are approved (or that has a patch), pnpm fails up front with `ERR_PNPM_FROZEN_STORE_NEEDS_BUILD` rather than crashing mid-build on a read-only write — seed the store with those builds first. Incompatible with `--force` and with a configured pnpr server, since both write into the store; the side-effects cache is likewise not written under `frozenStore`. If the store is missing its content directory, the install fails fast with `ERR_PNPM_FROZEN_STORE_INCOMPLETE` rather than attempting to initialize it. The read-only `immutable=1` open requires Node.js >=22.15.0, >=23.11.0, or >=24.0.0; on older runtimes `--frozen-store` fails with a clear `ERR_PNPM_FROZEN_STORE_UNSUPPORTED_NODE` error. Bin-linking also tolerates a read-only store: under the global virtual store a package's bin source lives inside the store, so the `chmod` that makes it executable would be refused — with `EPERM`/`EACCES`, or with `EROFS` on a genuinely read-only filesystem. That `chmod` is redundant when the seed already ships its bins executable with a normalized shebang, so it is now skipped in that case, while a non-executable bin (or one still carrying a Windows CRLF shebang) on a read-only store still errors.
+- When [`pacquet`](https://github.com/pnpm/pnpm/tree/main/pacquet) (the Rust port of pnpm) is declared in `configDependencies`, pnpm now delegates dependency **resolution** to it too — not just materialization — provided the installed pacquet is new enough to support full resolving installs (>= 0.11.7).
+
+  Previously pacquet only ran in frozen-install mode: pnpm always resolved the dependency graph itself (writing `pnpm-lock.yaml`) and handed pacquet a finished lockfile to fetch / import / link. With pacquet >= 0.11.7, a non-frozen `pnpm install` (default isolated `nodeLinker`, plain install) is delegated to pacquet end-to-end in a single pass — pacquet resolves the manifests, writes the lockfile, and materializes `node_modules`. pnpm detects the capability from the installed pacquet's version; older pacquet releases keep the resolve-then-materialize split, and `add` / `update` / `remove` still resolve in pnpm (it has to mutate the manifests first). This remains an opt-in preview of the Rust install engine [#11723](https://github.com/pnpm/pnpm/issues/11723).
+- Added a new opt-in `--batch` flag to `pnpm publish --recursive` that sends all selected packages to the registry in a single `PUT /-/pnpm/v1/publish` request instead of one request per package. The target registry has to implement the batch publish endpoint (pnpr does); registries that don't are reported with a clear `ERR_PNPM_BATCH_PUBLISH_UNSUPPORTED` error. The batch is processed all-or-nothing by pnpr: if any package in the batch fails validation, none of the packages are published.
+
+### Patch Changes
+
+- Reject path-traversal and reserved dependency aliases (such as `../../../escape`, `.bin`, `.pnpm`, or `node_modules`) that come from a lockfile rather than a freshly resolved manifest. A crafted lockfile alias could otherwise be joined directly under a hoisted `node_modules` directory, letting package files be written outside the intended install root or overwrite pnpm-owned layout.
+
+  The fix adds two layers:
+
+  - The `nodeLinker: hoisted` graph builder now validates each alias at the directory sink (`safeJoinModulesDir`), matching the validation pnpm already performs when resolving aliases from manifests.
+  - The lockfile verification gate (`verifyLockfileResolutions`) now runs an always-on, policy-independent check that rejects any importer or snapshot dependency alias that is not a valid package name, failing the install early — before any fetch or filesystem work — for every node linker at once.
+
+- Made shared package child resolution deterministic when the same package is reached through multiple contexts. pnpm now chooses the shallowest occurrence, then importer order, then parent path, instead of letting request timing decide the child context and missing-peer report [pnpm/pnpm#12358](https://github.com/pnpm/pnpm/issues/12358).
+- Fix garbled summary line after submitting `pnpm update -i` and `pnpm audit --fix -i`. The interactive checkbox prompt previously printed every selected choice's full table row (label, current/target versions, workspace, URL) joined by commas, producing a wall of text after pressing Enter. The summary now lists only the selected package names (or vulnerability keys) by setting an explicit `short` per choice; the in-progress selection UI is unchanged.
+- Prevent `pnpm patch-remove` from removing files outside the configured patches directory.
+- Fixed `pnpm publish` ignoring `strictSsl: false` when publishing to registries with self-signed certificates. The `strictSSL` option is now forwarded to `libnpmpublish` / `npm-registry-fetch` so that `strict-ssl=false` in `.npmrc` or `strictSsl: false` in `pnpm-workspace.yaml` is respected during publish, the same way it is for `pnpm install` [pnpm/pnpm#12012](https://github.com/pnpm/pnpm/issues/12012).
+- Fixed `Cannot destructure property 'manifest' of 'manifestsByPath[rootDir]' as it is undefined` regression introduced in 11.6.0 when running `pnpm add <pkg>` outside a workspace on Windows. `selectProjectByDir` was keying the resulting `ProjectsGraph` by `opts.dir` instead of `project.rootDir`, so downstream `manifestsByPath` lookups missed when the two paths normalized differently (typically drive-letter casing). [pnpm/pnpm#12379](https://github.com/pnpm/pnpm/issues/12379)
+- Git dependencies that point to a subdirectory of a repository (`repo#commit&path:/sub/dir`) keep their `path` in the lockfile again. Since the integrity of git-hosted tarballs started being pinned in the lockfile, any install that actually downloaded the tarball rebuilt the lockfile resolution as `{ integrity, tarball, gitHosted }` and dropped the `path` field, while installs served from the store kept it — so the field disappeared seemingly at random. Without `path`, later installs from that lockfile silently unpacked the repository root instead of the subdirectory [#12304](https://github.com/pnpm/pnpm/issues/12304).
+- Fixed nondeterministic lockfile output that made `pnpm dedupe --check` fail intermittently in CI. When a locked peer provider was pinned for a dependency that has no child dependencies of its own, the pinned provider leaked into the shared parent scope, so siblings resolved after it could pick up an optional peer they should not see. Which siblings were affected depended on resolution order, which varies with network timing.
+- Sped up `pnpm install` with a frozen lockfile by running lockfile verification (the policy revalidation gate added for `minimumReleaseAge`/`trustPolicy` and the tarball-URL anti-tamper check) concurrently with fetching and linking instead of blocking the whole install on it. Dependency lifecycle scripts are still held back until verification succeeds, so no script runs on an unverified lockfile: if verification fails the install aborts before any dependency build, and if linking finishes first the install waits for the verification verdict before completing.
+- User-defined `npm_config_*` environment variables are now preserved during lifecycle script execution. Previously, all `npm_`-prefixed env vars were stripped, which caused user-set variables like `npm_config_platform_arch` to be lost [pnpm/pnpm#12399](https://github.com/pnpm/pnpm/issues/12399).
+- pnpm can now use different auth tokens for different package scopes, even when those scopes use the same registry URL.
+
+  Previously, auth was selected only by registry URL. If `@org-a` and `@org-b` both used `https://npm.pkg.github.com/`, they had to share the same token. This caused problems for registries that issue tokens per organization or per scope.
+
+  Configure a scope-specific token by adding the package scope after the registry URL in the auth key:
+
+  ```ini
+  @org-a:registry=https://npm.pkg.github.com/
+  @org-b:registry=https://npm.pkg.github.com/
+
+  //npm.pkg.github.com/:@org-a:_authToken=${ORG_A_TOKEN}
+  //npm.pkg.github.com/:@org-b:_authToken=${ORG_B_TOKEN}
+
+  //npm.pkg.github.com/:_authToken=${FALLBACK_TOKEN}
+  ```
+
+  `pnpm login --registry=https://npm.pkg.github.com --scope=@org-a` writes the token to the same scope-specific auth key.
+
+  When installing or publishing `@org-a/*`, pnpm uses `ORG_A_TOKEN`. For `@org-b/*`, pnpm uses `ORG_B_TOKEN`. Packages without a matching scope continue to use the registry-wide fallback token.
+
+- `pnpm setup` no longer prompts to approve build scripts for `@pnpm/exe` when installing the standalone executable. pnpm links the platform-specific binary itself, so the package's install scripts are skipped during the global self-install [#12377](https://github.com/pnpm/pnpm/issues/12377).
+- Close lockfile reads deterministically before rewriting lockfiles and keep pacquet's virtual store directory length aligned with pnpm on Windows.
+- A `304 Not Modified` answer from the registry now renews the cached metadata file's mtime, so the `minimumReleaseAge` freshness shortcut keeps serving resolutions from the cache. Previously, once a cached packument grew older than `minimumReleaseAge`, every subsequent install re-validated it against the registry forever, because a 304 never rewrites the file.
+- Updated dependency ranges. Notably:
+
+  - `@pnpm/logger` peer dependency range moved to `^1100.0.0`.
+  - `msgpackr` 1.11.8 → 2.0.4 (store index files remain byte-compatible in both directions).
+  - `open` ^7.4.2 → ^11.0.0, `memoize` ^10 → ^11, `cli-truncate` ^5 → ^6, `pidtree` ^0.6 → ^1.
+  - `@yarnpkg/core` 4.5.0 → 4.8.0, `@rushstack/worker-pool` 0.7.7 → 0.7.18, `@cyclonedx/cyclonedx-library` 10.0.0 → 10.1.0, `@pnpm/config.nerf-dart` ^1 → ^2, `@pnpm/log.group` 3.0.2 → 4.0.1, `@pnpm/util.lex-comparator` ^3 → ^4.
+
+- Updated `@zkochan/cmd-shim` to v9.0.6.
+- Fixed a Windows-only hang where a failed command could take 20–46 seconds to exit. On error, pnpm enumerates descendant processes (via `pidtree`) to terminate them, which on Windows shells out to `wmic`/PowerShell `Get-CimInstance Win32_Process` — a lookup that is extremely slow on some machines. The lookup is now bounded by a short timeout so it can no longer stall the process exit.
+
+## 11.6.0
+
+### Minor Changes
+
+- `pnpm install` completes without re-resolving when `pnpm-lock.yaml` was deleted but `node_modules` is intact: the up-to-date check now treats the current lockfile (`node_modules/.pnpm/lock.yaml`) — the record of what the previous install materialized — as the wanted lockfile, verifies the manifests still match it, restores `pnpm-lock.yaml` from it, and reports "Already up to date". Previously this scenario triggered a full resolution and a re-verification of every locked package against the registry.
+- 615c669: Added support for configuring URL-scoped registry settings through `npm_config_//…` and `pnpm_config_//…` environment variables, for example:
+
+  ```text
+  npm_config_//registry.npmjs.org/:_authToken=<token>
+  pnpm_config_//registry.npmjs.org/:_authToken=<token>
+  ```
+
+  This provides a file-free way to supply registry authentication. Because the registry a value applies to is encoded in the (trusted) environment variable name, it is host-scoped by construction and cannot be redirected to another registry by repository-controlled config. The environment value is treated as trusted config: it takes precedence over a project/workspace `.npmrc` but is still overridden by command-line options. When the same key is provided through both prefixes, `pnpm_config_` wins.
+
+- Raised the default network concurrency from `min(64, max(cpuCores * 3, 16))` to `min(96, max(cpuCores * 3, 64))`. Package downloads are I/O-bound, not CPU-bound, so deriving the floor from the core count left machines with few cores (for example 4-vCPU CI runners) downloading only 16 tarballs at a time and unable to saturate a low-latency registry. The `networkConcurrency` setting still overrides the default.
+
+### Patch Changes
+
+- Improved the warning printed when a project `.npmrc` uses an environment variable in a registry/proxy URL or in registry credentials. The message now explains why the setting was ignored and how to migrate it to a trusted source — for example by moving the line to the user-level `~/.npmrc` or running `pnpm config set "<key>" <value>` — with a link to https://pnpm.io/npmrc. The `pnpm config set` example is only suggested when the key has no `${...}` placeholder, so the snippet is always safe to copy-paste.
+- Print a "Lockfile passes supply-chain policies (verified 2h ago)" message when lockfile verification is skipped because a cached verdict for the same lockfile content and policy is reused. Previously the cached short-circuit was completely silent, which made it look like the policy gate never ran [#12324](https://github.com/pnpm/pnpm/issues/12324).
+- Platform-specific optional dependencies are now skipped even when their `os`/`cpu`/`libc` fields are missing from the registry metadata or the lockfile. Some registries strip these fields from the package metadata, which made pnpm download and install the binaries of every platform regardless of `supportedArchitectures`. The missing platform fields of an optional dependency are now inferred from its name (e.g. `@nx/nx-win32-arm64-msvc` → `os: win32`, `cpu: arm64`), so foreign-platform binaries are skipped without even downloading them [#11702](https://github.com/pnpm/pnpm/issues/11702).
+
+## 11.5.3
+
+### Patch Changes
+
+- Stopped expanding environment variables in repository-controlled registry/proxy request destinations and registry credential values from `.npmrc`, and in workspace registry URLs from `pnpm-workspace.yaml`. Move dynamic registry URL and token configuration to trusted user, global, CLI, or environment config.
+- Resolve package-manager bootstrap dependencies with trusted user or CLI registry and network config, and reject package-manager env-lockfile records that do not use registry package paths with integrity-only resolutions before auto-switch execution.
+- Avoid writing `packageManagerDependencies` to `pnpm-lock.yaml` when package manager policy is set to `onFail: ignore` or `pmOnFail: ignore` [#12228](https://github.com/pnpm/pnpm/issues/12228).
+- Avoid running dependency-status auto-install when the dependency status is unavailable without a project manifest.
+- Using the `$` version reference syntax in `overrides` (e.g. `"react": "$react"`) now prints a deprecation warning. The syntax still works, but [catalogs](https://pnpm.io/catalogs) are the recommended way to keep an overridden version in sync with the rest of the workspace. Reference a catalog entry with the `catalog:` protocol instead.
+- Fixed `pnpm config get globalconfig` to return the global `config.yaml` path again [pnpm/pnpm#11962](https://github.com/pnpm/pnpm/issues/11962).
+- Fixed bare `--color` so it does not consume the following CLI flag, allowing command shorthands like `--parallel` to expand correctly and forms like `pnpm --color with current <command>` to dispatch the inner command instead of failing with `MISSING_WITH_CURRENT_CMD`.
+- Fix `pnpm install` ignoring `enableGlobalVirtualStore` toggle by including it in the workspace state settings check [#12142](https://github.com/pnpm/pnpm/issues/12142).
+- Security: pnpm now verifies the npm registry signature of a package-manager binary before spawning it, so a cloned repository cannot make pnpm download and execute an arbitrary native binary.
+
+  This covers two paths that select an executable from repository-controlled input:
+
+  - **pacquet install engine** — declaring `pacquet` (or `@pnpm/pacquet`) in `configDependencies` opts in to pnpm's Rust install engine. pnpm now verifies that the installed `pacquet` shim and the host's `@pacquet/<platform>-<arch>` binary carry a valid npm registry signature for their exact `name@version`, and refuses to run pacquet (failing the command) if the signature does not verify or cannot be checked. The only graceful fallback to pnpm's own engine is when pacquet has no binary for the current platform.
+  - **automatic version switch / `self-update`** — the `packageManager` / `devEngines.packageManager` field makes pnpm download and run a specific pnpm version. pnpm now verifies the registry signature of `pnpm`, `@pnpm/exe`, and the host platform binary before installing/spawning them, and refuses to run an engine whose signature does not match a published, signed release. The check runs only on an actual download (store cache miss), so it does not add a network round trip to every command.
+
+  In both cases the signature is verified over the _installed_ integrity, against npm's public signing keys that ship embedded in the pnpm CLI (like corepack), so bytes substituted via a tampered lockfile or a repository-controlled registry fail verification — and a registry the user did not vouch for cannot supply its own signing keys. The signed packument is fetched from the configured registry, so an npm mirror works transparently. Verification fails closed: if it cannot be completed (for example, the registry is unreachable), the command fails rather than running an unverified binary. The embedded keys are kept current by a release-time check against npm's signing-keys endpoint.
+
+- Made peer-dependent deduplication deterministic. When a peer-suffixed package variant was a subset of two or more mutually incompatible larger variants, the variant it collapsed into depended on the order importers were resolved in, which varies between machines. This could resolve the same workspace to different lockfiles on different platforms and make `pnpm dedupe --check` alternate between passing and failing.
+- Reject invalid package names and versions from staged tarball manifests before deriving filenames for `pnpm stage download`.
+- Clarified in CLI help that the pnpm store is trusted shared state and store integrity checks are corruption detection, not a tamper boundary for untrusted store writers.
+- Reject reserved manifest `bin` names (`""`, `"."`, `".."`, and scoped forms such as `@scope/..`) when resolving a package's bins. These names previously passed the bin-name guard and, when joined to the global bin directory during global remove/update/add operations, could resolve to the global bin directory itself or its parent and have it recursively deleted.
+- Require trusted package identity before package-name `allowBuilds` entries can approve lifecycle scripts for git, git-hosted tarball, direct tarball, and local directory artifacts. To approve one of those artifacts explicitly, use its peer-suffix-free lockfile depPath as the `allowBuilds` key. Lockfile verification now rejects lockfiles where a registry-style dependency path (`name@semver`) is backed by a git, directory, or git-hosted tarball resolution (`ERR_PNPM_RESOLUTION_SHAPE_MISMATCH`), so the dependency path is a reliable artifact identity by the time scripts can run.
+- Security: pnpm now verifies the OpenPGP signature of a downloaded Node.js runtime's `SHASUMS256.txt` before trusting its integrity hashes.
+
+  When a repository requests a Node.js runtime (e.g. via `devEngines.runtime` / `useNodeVersion`), the download mirror is repository-configurable through `node-mirror:<channel>`. The integrity of the downloaded binary was only checked against `SHASUMS256.txt` fetched from that same mirror — a circular check that a malicious mirror could satisfy by serving a tampered binary together with a matching `SHASUMS256.txt`. pnpm then executes the binary (for example to run lifecycle scripts).
+
+  pnpm now fetches `SHASUMS256.txt.sig` and verifies the detached OpenPGP signature against the Node.js release team's public keys, which ship embedded in the pnpm CLI. A mirror that serves a tampered binary cannot also produce a valid signature, so the download fails to verify. The embedded keys are kept current by a release-time check against the canonical `nodejs/release-keys` list.
+
+  The musl variants from the hardcoded `unofficial-builds.nodejs.org` mirror are not repository-configurable and are signed by a different key, so they continue to be trusted over TLS.
+
+## 11.5.2
+
+### Patch Changes
+
+- Peer dependency resolution now reuses the peer contexts already recorded in the lockfile when those providers are still present in the dependency graph and still satisfy the peer ranges. This avoids unnecessary peer-context rewrites during lockfile regeneration. Current manifest choices remain authoritative: a newly added, explicitly updated, or aliased direct provider, a changed nested provider, or a locked version that no longer satisfies the range still takes precedence.
+- The lockfile verifier now checks that a registry entry pinning an explicit `tarball` URL points at the artifact the registry's own metadata lists for that `name@version`. Previously a tampered lockfile could pair a trusted `name@version` with an attacker-chosen tarball URL (and a matching integrity for those bytes), so the install fetched the attacker's bytes. A mismatch — or any entry that can't be confirmed against the registry — is rejected with `ERR_PNPM_TARBALL_URL_MISMATCH`. Non-registry resolutions (`file:`, git-hosted, etc.) and registry entries without an explicit tarball URL (the URL is reconstructed from name+version+registry, so it is inherently bound) are unaffected; non-standard registry tarball URLs (npm Enterprise, GitHub Packages) still pass because they match the metadata.
+- Fix `pnpm update --recursive --lockfile-only <pkg>@<version>` crashing with `Invalid Version` when the catalog entry for `<pkg>` is a version range (e.g. `^21.2.10`) and `catalogMode` is `strict` or `prefer`. The catalog–version comparison now skips the equality check when either side is a range rather than passing a range to `semver.eq()`, so range specifiers fall through to the existing mismatch handling instead of throwing [#11570](https://github.com/pnpm/pnpm/issues/11570).
+- Avoided a Node.js crash when pnpm exits after network requests on Windows.
+- Fixed packages being materialized into the virtual store without their root-level files (`package.json`, `LICENSE`, README, root entrypoints) when multiple `pnpm install` processes ran against the same store/workspace concurrently. The fast import path used to destructively empty the shared target directory, so a concurrent importer could wipe files another importer had already written; if the surviving files included the `package.json` completion marker, every later install treated the broken directory as complete and never repaired it. The fast path now imports directly only when it can create the target directory exclusively, and otherwise builds the package in a private temp directory and atomically renames it into place [#12197](https://github.com/pnpm/pnpm/issues/12197).
+- Fix dependency build scripts not running under the global virtual store (`enableGlobalVirtualStore`).
+
+  In a workspace install, dependency build scripts are deferred to a single `rebuild` pass (`buildProjects`). That pass resolved each package's location from the classic `node_modules/.pnpm/<depPathToFilename>` layout, which does not exist under the global virtual store — so native dependencies (e.g. packages using `node-gyp` / `prebuild-install`) were never built and failed to load at runtime (`Cannot find module .../build/Release/*.node`).
+
+  `buildProjects` now resolves the global-virtual-store projection directory (`<storeDir>/links/<hash>`, computed with the same graph hash the installer uses) when `enableGlobalVirtualStore` is set, and serializes concurrent builds of the same shared projection so parallel workspace projects don't race on the same directory.
+
+- Don't promote a `runtime:` dependency (such as the Node.js version from `devEngines.runtime` or `pnpm runtime set`) into a catalog when `catalogMode` is `strict` or `prefer`. A `runtime:` dependency round-trips to `devEngines.runtime`, which only recognizes the `runtime:` protocol; cataloging it rewrote the manifest entry to `catalog:`, which broke that round-trip, stranded it in `devDependencies`, and left `devEngines.runtime` untouched.
+- Skip lockfile `minimumReleaseAge`/`trustPolicy` verification for non-registry tarball protocols (for example `file:`), so local tarball dependencies are not incorrectly checked against npm registry metadata.
+
 ## 11.5.1
 
 ### Patch Changes

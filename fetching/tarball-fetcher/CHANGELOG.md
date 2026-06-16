@@ -1,5 +1,81 @@
 # @pnpm/tarball-fetcher
 
+## 1102.0.0
+
+### Patch Changes
+
+- 681b593: pnpm can now use different auth tokens for different package scopes, even when those scopes use the same registry URL.
+
+  Previously, auth was selected only by registry URL. If `@org-a` and `@org-b` both used `https://npm.pkg.github.com/`, they had to share the same token. This caused problems for registries that issue tokens per organization or per scope.
+
+  Configure a scope-specific token by adding the package scope after the registry URL in the auth key:
+
+  ```ini
+  @org-a:registry=https://npm.pkg.github.com/
+  @org-b:registry=https://npm.pkg.github.com/
+
+  //npm.pkg.github.com/:@org-a:_authToken=${ORG_A_TOKEN}
+  //npm.pkg.github.com/:@org-b:_authToken=${ORG_B_TOKEN}
+
+  //npm.pkg.github.com/:_authToken=${FALLBACK_TOKEN}
+  ```
+
+  `pnpm login --registry=https://npm.pkg.github.com --scope=@org-a` writes the token to the same scope-specific auth key.
+
+  When installing or publishing `@org-a/*`, pnpm uses `ORG_A_TOKEN`. For `@org-b/*`, pnpm uses `ORG_B_TOKEN`. Packages without a matching scope continue to use the registry-wide fallback token.
+
+- a31faa7: Updated dependency ranges. Notably:
+
+  - `@pnpm/logger` peer dependency range moved to `^1100.0.0`.
+  - `msgpackr` 1.11.8 → 2.0.4 (store index files remain byte-compatible in both directions).
+  - `open` ^7.4.2 → ^11.0.0, `memoize` ^10 → ^11, `cli-truncate` ^5 → ^6, `pidtree` ^0.6 → ^1.
+  - `@yarnpkg/core` 4.5.0 → 4.8.0, `@rushstack/worker-pool` 0.7.7 → 0.7.18, `@cyclonedx/cyclonedx-library` 10.0.0 → 10.1.0, `@pnpm/config.nerf-dart` ^1 → ^2, `@pnpm/log.group` 3.0.2 → 4.0.1, `@pnpm/util.lex-comparator` ^3 → ^4.
+
+- Updated dependencies [61810aa]
+- Updated dependencies [681b593]
+- Updated dependencies [a31faa7]
+  - @pnpm/store.index@1100.2.0
+  - @pnpm/worker@1100.2.0
+  - @pnpm/fetching.types@1100.0.2
+  - @pnpm/types@1101.3.2
+  - @pnpm/core-loggers@1100.2.1
+  - @pnpm/exec.prepare-package@1100.0.18
+  - @pnpm/fetching.fetcher-base@1100.1.9
+
+## 1101.0.14
+
+### Patch Changes
+
+- Updated dependencies [f11b4fc]
+  - @pnpm/core-loggers@1100.2.0
+  - @pnpm/exec.prepare-package@1100.0.17
+  - @pnpm/worker@1100.1.11
+
+## 1101.0.13
+
+### Patch Changes
+
+- bf1b731: Require trusted package identity before package-name `allowBuilds` entries can approve lifecycle scripts for git, git-hosted tarball, direct tarball, and local directory artifacts. To approve one of those artifacts explicitly, use its peer-suffix-free lockfile depPath as the `allowBuilds` key. Lockfile verification now rejects lockfiles where a registry-style dependency path (`name@semver`) is backed by a git, directory, or git-hosted tarball resolution (`ERR_PNPM_RESOLUTION_SHAPE_MISMATCH`), so the dependency path is a reliable artifact identity by the time scripts can run.
+- Updated dependencies [089484a]
+- Updated dependencies [bf1b731]
+  - @pnpm/worker@1100.1.10
+  - @pnpm/exec.prepare-package@1100.0.16
+  - @pnpm/types@1101.3.1
+  - @pnpm/core-loggers@1100.1.4
+  - @pnpm/fetching.fetcher-base@1100.1.8
+
+## 1101.0.12
+
+### Patch Changes
+
+- Updated dependencies [3b76b8e]
+- Updated dependencies [a017bf3]
+  - @pnpm/worker@1100.1.9
+  - @pnpm/types@1101.3.0
+  - @pnpm/core-loggers@1100.1.3
+  - @pnpm/exec.prepare-package@1100.0.15
+  - @pnpm/fetching.fetcher-base@1100.1.7
+
 ## 1101.0.11
 
 ### Patch Changes

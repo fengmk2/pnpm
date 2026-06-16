@@ -1,5 +1,47 @@
 # @pnpm/testing.temp-store
 
+## 1100.1.9
+
+### Patch Changes
+
+- Updated dependencies [61810aa]
+- Updated dependencies [a31faa7]
+  - @pnpm/store.index@1100.2.0
+  - @pnpm/store.controller@1102.0.0
+  - @pnpm/installing.client@1100.2.8
+  - @pnpm/resolving.resolver-base@1100.4.2
+  - @pnpm/store.controller-types@1100.1.5
+  - @pnpm/testing.registry-mock@1100.0.6
+
+## 1100.1.8
+
+### Patch Changes
+
+- @pnpm/store.controller@1101.0.13
+- @pnpm/installing.client@1100.2.7
+- @pnpm/testing.registry-mock@1100.0.5
+
+## 1100.1.7
+
+### Patch Changes
+
+- @pnpm/installing.client@1100.2.6
+- @pnpm/resolving.resolver-base@1100.4.1
+- @pnpm/store.controller@1101.0.12
+- @pnpm/store.controller-types@1100.1.4
+- @pnpm/testing.registry-mock@1100.0.4
+
+## 1100.1.6
+
+### Patch Changes
+
+- Updated dependencies [6d17b66]
+  - @pnpm/resolving.resolver-base@1100.4.0
+  - @pnpm/installing.client@1100.2.5
+  - @pnpm/testing.registry-mock@1100.0.3
+  - @pnpm/store.controller@1101.0.11
+  - @pnpm/store.controller-types@1100.1.3
+
 ## 1100.1.5
 
 ### Patch Changes

@@ -36,7 +36,7 @@ use pacquet_registry::{Package, PackageVersion};
 use pacquet_resolving_resolver_base::{
     LatestInfo, LatestQuery, ResolutionPolicyViolation, ResolveError, ResolveFuture,
     ResolveLatestFuture, ResolveOptions, ResolveResult, Resolver, UpdateBehavior, WantedDependency,
-    WorkspacePackages,
+    WorkspacePackages, parse_packument_timestamp,
 };
 
 use crate::{
@@ -120,6 +120,9 @@ pub struct NpmResolver<Cache: PackageMetaCache> {
     /// [`PickPackageContext::full_metadata`]. Mirrors upstream's
     /// [`ctx.fullMetadata`](https://github.com/pnpm/pnpm/blob/2a9bd897bf/resolving/npm-resolver/src/pickPackage.ts#L175).
     pub full_metadata: bool,
+    /// When full metadata is forced, read and write pnpm's filtered
+    /// full-metadata mirror.
+    pub filter_metadata: bool,
     /// Retry budget threaded through to
     /// [`PickPackageContext::retry_opts`]. Sourced from the install's
     /// `fetch-retries` config.
@@ -330,14 +333,13 @@ impl<Cache: PackageMetaCache + 'static> NpmResolver<Cache> {
             return Ok(None);
         };
 
-        let registry =
-            self.registries.get("@jsr").map(String::as_str).unwrap_or(DEFAULT_JSR_REGISTRY);
+        let registry = self.registries.get("@jsr").map_or(DEFAULT_JSR_REGISTRY, String::as_str);
 
         let optional = wanted_dependency.optional.unwrap_or(false);
-        let picked = match self.pick_from_registry(registry, &jsr_spec.spec, opts, optional).await?
-        {
-            Some(picked) => picked,
-            None => return Ok(None),
+        let Some(picked) =
+            self.pick_from_registry(registry, &jsr_spec.spec, opts, optional).await?
+        else {
+            return Ok(None);
         };
 
         let result = build_resolve_result(BuildResolveResult {
@@ -366,9 +368,13 @@ impl<Cache: PackageMetaCache + 'static> NpmResolver<Cache> {
         opts: &ResolveOptions,
         optional: bool,
     ) -> Result<Option<PickedFromRegistry>, ResolveError> {
+        let overlay_selectors =
+            crate::preferred_overlay::overlay_merged_selectors(opts, &spec.name);
         let pick_opts = PickPackageOptions {
             registry,
-            preferred_version_selectors: opts.preferred_versions.get(&spec.name),
+            preferred_version_selectors: overlay_selectors
+                .as_ref()
+                .or_else(|| opts.preferred_versions.get(&spec.name)),
             published_by: opts.published_by,
             published_by_exclude: opts.published_by_exclude.as_ref(),
             pick_lowest_version: opts.pick_lowest_version,
@@ -388,6 +394,7 @@ impl<Cache: PackageMetaCache + 'static> NpmResolver<Cache> {
             prefer_offline: self.prefer_offline,
             ignore_missing_time_field: self.ignore_missing_time_field,
             full_metadata: self.full_metadata,
+            filter_metadata: self.filter_metadata,
             retry_opts: self.retry_opts,
         };
 
@@ -506,7 +513,7 @@ fn try_workspace_shadow(
 /// fallback helper expects. `registry` and `default_tag` are unused on
 /// the fallback path (the spec has already been parsed against the
 /// registry) so dummy values are passed through.
-fn workspace_fallback_options<'a>(opts: &'a ResolveOptions) -> ResolveFromWorkspaceOptions<'a> {
+fn workspace_fallback_options(opts: &ResolveOptions) -> ResolveFromWorkspaceOptions<'_> {
     const UNUSED: &str = "";
     ResolveFromWorkspaceOptions {
         project_dir: opts.project_dir.as_path(),
@@ -535,7 +542,7 @@ fn default_tag_spec(alias: &str, default_tag: &str) -> RegistryPackageSpec {
 /// full packument (with all versions) on every pick.
 pub(crate) struct PickedFromRegistry {
     pub(crate) meta: std::sync::Arc<Package>,
-    pub(crate) version: PackageVersion,
+    pub(crate) version: std::sync::Arc<PackageVersion>,
 }
 
 /// Input bundle for [`build_resolve_result`]. Grouped so the
@@ -555,6 +562,10 @@ pub(crate) struct BuildResolveResult<'a> {
     pub picked_manifest_cache: &'a crate::PickedManifestCache,
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "destructures BuildResolveResult and consumes its fields by value downstream"
+)]
 pub(crate) fn build_resolve_result(
     args: BuildResolveResult<'_>,
 ) -> Result<ResolveResult, ResolveError> {
@@ -600,15 +611,13 @@ pub(crate) fn build_resolve_result(
     // wrong peers, wrong lockfile metadata. Matches `meta_cache`'s
     // `{registry}\x00{name}` scoping shape.
     let manifest_cache_key = format!("{registry}\x00{}@{version_str}", picked.name);
-    let manifest = match picked_manifest_cache.get(&manifest_cache_key) {
-        Some(cached) => Some(Arc::clone(cached.value())),
-        None => {
-            let arc = Arc::new(
-                serde_json::to_value(picked).map_err(|err| Box::new(err) as ResolveError)?,
-            );
-            picked_manifest_cache.insert(manifest_cache_key, Arc::clone(&arc));
-            Some(arc)
-        }
+    let manifest = if let Some(cached) = picked_manifest_cache.get(&manifest_cache_key) {
+        Some(Arc::clone(cached.value()))
+    } else {
+        let arc =
+            Arc::new(serde_json::to_value(picked).map_err(|err| Box::new(err) as ResolveError)?);
+        picked_manifest_cache.insert(manifest_cache_key, Arc::clone(&arc));
+        Some(arc)
     };
     let policy_violation = detect_min_release_age_violation(
         &pkg_name,
@@ -682,7 +691,7 @@ fn detect_min_release_age_violation(
             _ => {}
         }
     }
-    let parsed = DateTime::parse_from_rfc3339(timestamp).ok()?.with_timezone(&Utc);
+    let parsed = parse_packument_timestamp(timestamp)?;
     if parsed <= cutoff {
         return None;
     }

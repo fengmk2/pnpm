@@ -72,6 +72,7 @@ impl RegistryAnchor {
         fs::write(RegistryAnchor::path(), text).expect("write to anchor");
     }
 
+    #[must_use]
     pub fn load_or_init(init_options: MockInstanceOptions<'_>) -> Self {
         if let Some(guard) = GuardFile::try_lock() {
             // Run the spawn on a fresh OS thread so the freshly built tokio
@@ -98,7 +99,11 @@ impl RegistryAnchor {
             let anchor = RegistryAnchor { ref_count: 1, info };
             anchor.save();
             guard.unlock();
-            forget(mock_instance); // prevent this process from killing itself on drop
+            #[expect(
+                clippy::mem_forget,
+                reason = "prevent this process from killing itself on drop"
+            )]
+            forget(mock_instance);
             anchor
         } else {
             let guard = GuardFile::lock();
@@ -157,6 +162,6 @@ impl GuardFile {
     }
 
     fn unlock(self) {
-        drop(self)
+        drop(self);
     }
 }

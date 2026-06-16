@@ -1,13 +1,17 @@
 use super::{
-    CreateVirtualStoreError, InstallPackageBySnapshotError, emit_warm_snapshot_progress,
-    integrity_equal, snapshot_cache_key, snapshot_deps_equal,
+    CreateVirtualStore, CreateVirtualStoreError, InstallPackageBySnapshotError,
+    emit_warm_snapshot_progress, integrity_equal, snapshot_cache_key, snapshot_deps_equal,
 };
 use pacquet_lockfile::{
     GitResolution, LockfileResolution, PackageKey, PackageMetadata, PkgName, PkgVerPeer,
     RegistryResolution, SnapshotDepRef, SnapshotEntry, TarballResolution,
 };
-use pacquet_reporter::{LogEvent, ProgressMessage, Reporter};
-use std::{collections::HashMap, sync::Mutex};
+use pacquet_reporter::{LogEvent, ProgressMessage, Reporter, SilentReporter};
+use std::{
+    collections::HashMap,
+    fs,
+    sync::{Arc, Mutex, atomic::AtomicU8},
+};
 
 fn name(text: &str) -> PkgName {
     PkgName::parse(text).expect("parse pkg name")
@@ -18,6 +22,7 @@ fn metadata_with_integrity(integrity: &str) -> PackageMetadata {
         resolution: LockfileResolution::Registry(RegistryResolution {
             integrity: integrity.parse().expect("parse integrity"),
         }),
+        version: None,
         engines: None,
         cpu: None,
         os: None,
@@ -39,13 +44,132 @@ fn snapshot_with_dep(child: &str, ref_str: &str) -> SnapshotEntry {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cold_batch_links_slots_in_parallel() {
+    use crate::{AllowBuildPolicy, SkippedSnapshots, VirtualStoreLayout};
+    use pacquet_config::{Config, NodeLinker, PackageImportMethod};
+    use pacquet_store_dir::StoreIndexWriter;
+    use pacquet_tarball::{CacheValue, MemCache, SharedReportedProgressKeys};
+
+    if rayon::current_num_threads() < 2 {
+        eprintln!(
+            "skipping cold-batch concurrency assertion with rayon_threads={}",
+            rayon::current_num_threads(),
+        );
+        return;
+    }
+
+    let root = tempfile::tempdir().expect("create temp dir");
+    let workspace_root = root.path().join("workspace");
+    fs::create_dir_all(&workspace_root).expect("create workspace root");
+    let modules_dir = workspace_root.join("node_modules");
+    let virtual_store_dir = modules_dir.join(".pacquet");
+    let store_dir = root.path().join("store");
+
+    let mut config = Config::new();
+    config.registry = "https://registry.test".to_string();
+    config.store_dir = store_dir.into();
+    config.modules_dir = modules_dir;
+    config.virtual_store_dir = virtual_store_dir.clone();
+    config.package_import_method = PackageImportMethod::Copy;
+    config.offline = true;
+    let config = config.leak();
+
+    let mut snapshots = HashMap::new();
+    let mut packages = HashMap::new();
+    let mem_cache = Arc::new(MemCache::default());
+    for package_name in ["cold-a", "cold-b", "cold-c", "cold-d"] {
+        let package_key = key(package_name, "1.0.0");
+        let source_dir = workspace_root.join("prefetched").join(package_name);
+        fs::create_dir_all(&source_dir).expect("create prefetched package dir");
+        let manifest_path = source_dir.join("package.json");
+        let manifest = if package_name == "cold-a" {
+            format!(
+                r#"{{"name":"{package_name}","version":"1.0.0","scripts":{{"postinstall":"node build.js"}}}}"#,
+            )
+        } else {
+            format!(r#"{{"name":"{package_name}","version":"1.0.0"}}"#)
+        };
+        fs::write(&manifest_path, manifest).expect("write package manifest");
+        let index_path = source_dir.join("index.js");
+        fs::write(&index_path, "module.exports = true\n").expect("write package body");
+
+        let cas_paths = HashMap::from([
+            ("package.json".to_string(), manifest_path),
+            ("index.js".to_string(), index_path),
+        ]);
+        mem_cache.insert(
+            format!("https://registry.test/{package_name}/-/{package_name}-1.0.0.tgz"),
+            Arc::new(tokio::sync::RwLock::new(CacheValue::Available(Arc::new(cas_paths)))),
+        );
+
+        snapshots.insert(package_key.clone(), SnapshotEntry::default());
+        packages.insert(package_key.without_peer(), metadata_with_integrity(DUMMY_SHA512));
+    }
+
+    let allow_build_policy = AllowBuildPolicy::default();
+    let layout = VirtualStoreLayout::new(
+        config,
+        None,
+        Some(&snapshots),
+        Some(&packages),
+        Some(&allow_build_policy),
+    );
+    let skipped = SkippedSnapshots::new();
+    let logged_methods = AtomicU8::new(0);
+    let progress_reported = SharedReportedProgressKeys::default();
+    let (store_index_writer, writer_task) = StoreIndexWriter::spawn(&config.store_dir);
+    let requester = workspace_root.to_string_lossy().into_owned();
+    let probe =
+        crate::create_virtual_dir_by_snapshot::tests::LinkConcurrencyProbe::waiting_for_overlap();
+
+    let output = CreateVirtualStore {
+        http_client: &pacquet_network::ThrottledClient::default(),
+        config,
+        packages: Some(&packages),
+        snapshots: Some(&snapshots),
+        current_snapshots: None,
+        current_packages: None,
+        layout: &layout,
+        logged_methods: &logged_methods,
+        requester: &requester,
+        store_index_writer: &store_index_writer,
+        allow_build_policy: &allow_build_policy,
+        skipped: &skipped,
+        workspace_root: &workspace_root,
+        node_linker: NodeLinker::Isolated,
+        progress_reported: &progress_reported,
+        tarball_mem_cache: Some(&mem_cache),
+        link_concurrency_probe: Some(&probe),
+    }
+    .run::<SilentReporter>()
+    .await
+    .expect("all-cold virtual-store creation should succeed from the mem cache");
+
+    drop(store_index_writer);
+    writer_task.await.expect("join store-index writer").expect("flush store-index writer");
+
+    assert!(
+        probe.max_concurrent() >= 2,
+        "cold-batch slot linking must overlap; observed max_concurrent={} with rayon_threads={}",
+        probe.max_concurrent(),
+        rayon::current_num_threads(),
+    );
+    let cold_a = key("cold-a", "1.0.0");
+    let cold_b = key("cold-b", "1.0.0");
+    assert_eq!(output.requires_build_by_snapshot.get(&cold_a), Some(&true));
+    assert_eq!(output.requires_build_by_snapshot.get(&cold_b), Some(&false));
+}
+
+const DUMMY_SHA512: &str = "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==";
+
 /// `emit_warm_snapshot_progress` fires `resolved` then
-/// `found_in_store` in that order for one (package_id, requester)
-/// pair. Both events carry the same identifiers — pnpm's per-package
-/// counter relies on the pair to pin the tick to the right package
-/// row.
+/// `found_in_store` when no earlier fetch path already emitted the
+/// package status. Both events carry the same identifiers — pnpm's
+/// per-package counter relies on the pair to pin the tick to the right
+/// package row.
 #[test]
-fn emits_resolved_then_found_in_store_with_matching_identifiers() {
+fn emits_resolved_then_found_in_store_when_not_progress_reported() {
     static EVENTS: Mutex<Vec<LogEvent>> = Mutex::new(Vec::new());
 
     struct RecordingReporter;
@@ -56,7 +180,7 @@ fn emits_resolved_then_found_in_store_with_matching_identifiers() {
     }
 
     EVENTS.lock().unwrap().clear();
-    emit_warm_snapshot_progress::<RecordingReporter>("react@18.0.0", "/proj");
+    emit_warm_snapshot_progress::<RecordingReporter>("react@18.0.0", "/proj", false);
 
     let captured = EVENTS.lock().unwrap();
     assert!(
@@ -76,6 +200,38 @@ fn emits_resolved_then_found_in_store_with_matching_identifiers() {
             ),
         ),
         "warm-snapshot pair must be (Resolved, FoundInStore) with matching identifiers; got {captured:?}",
+    );
+}
+
+/// When an earlier fetch path already emitted `fetched` or
+/// `found_in_store`, the warm batch emits only `resolved` so the
+/// package status is not double-counted. Regression guard for
+/// <https://github.com/pnpm/pnpm/issues/12235>.
+#[test]
+fn emits_only_resolved_when_progress_reported() {
+    static EVENTS: Mutex<Vec<LogEvent>> = Mutex::new(Vec::new());
+
+    struct RecordingReporter;
+    impl Reporter for RecordingReporter {
+        fn emit(event: &LogEvent) {
+            EVENTS.lock().unwrap().push(event.clone());
+        }
+    }
+
+    EVENTS.lock().unwrap().clear();
+    emit_warm_snapshot_progress::<RecordingReporter>("react@18.0.0", "/proj", true);
+
+    let captured = EVENTS.lock().unwrap();
+    assert!(
+        matches!(
+            captured.as_slice(),
+            [LogEvent::Progress(r)] if matches!(
+                &r.message,
+                ProgressMessage::Resolved { package_id, requester }
+                    if package_id == "react@18.0.0" && requester == "/proj"
+            ),
+        ),
+        "already-reported warm snapshot must report only Resolved; got {captured:?}",
     );
 }
 
@@ -186,6 +342,7 @@ fn git_metadata() -> PackageMetadata {
             commit: "e63c09e460269b0c535e4c34debf69bb91d57b22".to_string(),
             path: None,
         }),
+        version: None,
         engines: None,
         cpu: None,
         os: None,
@@ -207,6 +364,7 @@ fn git_hosted_tarball_metadata() -> PackageMetadata {
             git_hosted: Some(true),
             path: None,
         }),
+        version: None,
         engines: None,
         cpu: None,
         os: None,
@@ -231,7 +389,8 @@ fn snapshot_cache_key_for_git_resolution_uses_git_hosted_key() {
     let pkg = key("ts-pipe-compose", "0.2.1");
     let packages = HashMap::from([(pkg.clone(), git_metadata())]);
 
-    let received = snapshot_cache_key(&pkg, &packages).expect("snapshot_cache_key must not error");
+    let received =
+        snapshot_cache_key(&pkg, &packages, false).expect("snapshot_cache_key must not error");
     assert_eq!(
         received,
         Some(format!("{pkg}\tbuilt")),
@@ -247,7 +406,8 @@ fn snapshot_cache_key_for_git_hosted_tarball_uses_git_hosted_key() {
     let pkg = key("foo", "1.0.0");
     let packages = HashMap::from([(pkg.clone(), git_hosted_tarball_metadata())]);
 
-    let received = snapshot_cache_key(&pkg, &packages).expect("snapshot_cache_key must not error");
+    let received =
+        snapshot_cache_key(&pkg, &packages, false).expect("snapshot_cache_key must not error");
     assert_eq!(
         received,
         Some(format!("{pkg}\tbuilt")),
@@ -264,8 +424,8 @@ fn snapshot_cache_key_rejects_tarball_without_integrity() {
     let pkg = key("foo", "1.0.0");
     let packages = HashMap::from([(pkg.clone(), tarball_metadata_without_integrity())]);
 
-    let err =
-        snapshot_cache_key(&pkg, &packages).expect_err("missing integrity must reject upfront");
+    let err = snapshot_cache_key(&pkg, &packages, false)
+        .expect_err("missing integrity must reject upfront");
     assert!(
         matches!(
             &err,
@@ -285,6 +445,7 @@ fn tarball_metadata_without_integrity() -> PackageMetadata {
             git_hosted: None,
             path: None,
         }),
+        version: None,
         engines: None,
         cpu: None,
         os: None,

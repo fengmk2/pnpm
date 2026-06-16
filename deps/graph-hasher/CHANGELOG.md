@@ -1,5 +1,45 @@
 # @pnpm/calc-dep-state
 
+## 1100.2.5
+
+### Patch Changes
+
+- Updated dependencies [f20ad8f]
+- Updated dependencies [681b593]
+- Updated dependencies [a31faa7]
+  - @pnpm/lockfile.utils@1100.0.13
+  - @pnpm/types@1101.3.2
+  - @pnpm/deps.path@1100.0.8
+  - @pnpm/engine.runtime.system-version@1100.0.3
+  - @pnpm/lockfile.types@1100.0.11
+  - @pnpm/resolving.resolver-base@1100.4.2
+
+## 1100.2.4
+
+### Patch Changes
+
+- bf1b731: Require trusted package identity before package-name `allowBuilds` entries can approve lifecycle scripts for git, git-hosted tarball, direct tarball, and local directory artifacts. To approve one of those artifacts explicitly, use its peer-suffix-free lockfile depPath as the `allowBuilds` key. Lockfile verification now rejects lockfiles where a registry-style dependency path (`name@semver`) is backed by a git, directory, or git-hosted tarball resolution (`ERR_PNPM_RESOLUTION_SHAPE_MISMATCH`), so the dependency path is a reliable artifact identity by the time scripts can run.
+- Updated dependencies [bf1b731]
+  - @pnpm/types@1101.3.1
+  - @pnpm/deps.path@1100.0.7
+  - @pnpm/engine.runtime.system-version@1100.0.2
+  - @pnpm/lockfile.types@1100.0.10
+  - @pnpm/lockfile.utils@1100.0.12
+  - @pnpm/resolving.resolver-base@1100.4.1
+
+## 1100.2.3
+
+### Patch Changes
+
+- Updated dependencies [a017bf3]
+- Updated dependencies [6d17b66]
+  - @pnpm/types@1101.3.0
+  - @pnpm/resolving.resolver-base@1100.4.0
+  - @pnpm/deps.path@1100.0.6
+  - @pnpm/engine.runtime.system-version@1100.0.1
+  - @pnpm/lockfile.types@1100.0.9
+  - @pnpm/lockfile.utils@1100.0.11
+
 ## 1100.2.2
 
 ### Patch Changes

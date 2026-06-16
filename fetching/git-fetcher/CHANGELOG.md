@@ -1,5 +1,53 @@
 # @pnpm/git-fetcher
 
+## 1102.0.0
+
+### Patch Changes
+
+- a31faa7: Updated dependency ranges. Notably:
+
+  - `@pnpm/logger` peer dependency range moved to `^1100.0.0`.
+  - `msgpackr` 1.11.8 → 2.0.4 (store index files remain byte-compatible in both directions).
+  - `open` ^7.4.2 → ^11.0.0, `memoize` ^10 → ^11, `cli-truncate` ^5 → ^6, `pidtree` ^0.6 → ^1.
+  - `@yarnpkg/core` 4.5.0 → 4.8.0, `@rushstack/worker-pool` 0.7.7 → 0.7.18, `@cyclonedx/cyclonedx-library` 10.0.0 → 10.1.0, `@pnpm/config.nerf-dart` ^1 → ^2, `@pnpm/log.group` 3.0.2 → 4.0.1, `@pnpm/util.lex-comparator` ^3 → ^4.
+
+- Updated dependencies [61810aa]
+- Updated dependencies [a31faa7]
+  - @pnpm/store.index@1100.2.0
+  - @pnpm/worker@1100.2.0
+  - @pnpm/resolving.git-resolver@1100.1.6
+  - @pnpm/exec.prepare-package@1100.0.18
+  - @pnpm/fetching.fetcher-base@1100.1.9
+
+## 1101.0.13
+
+### Patch Changes
+
+- @pnpm/exec.prepare-package@1100.0.17
+- @pnpm/worker@1100.1.11
+- @pnpm/resolving.git-resolver@1100.1.5
+
+## 1101.0.12
+
+### Patch Changes
+
+- bf1b731: Require trusted package identity before package-name `allowBuilds` entries can approve lifecycle scripts for git, git-hosted tarball, direct tarball, and local directory artifacts. To approve one of those artifacts explicitly, use its peer-suffix-free lockfile depPath as the `allowBuilds` key. Lockfile verification now rejects lockfiles where a registry-style dependency path (`name@semver`) is backed by a git, directory, or git-hosted tarball resolution (`ERR_PNPM_RESOLUTION_SHAPE_MISMATCH`), so the dependency path is a reliable artifact identity by the time scripts can run.
+- Updated dependencies [089484a]
+- Updated dependencies [bf1b731]
+  - @pnpm/worker@1100.1.10
+  - @pnpm/exec.prepare-package@1100.0.16
+  - @pnpm/fetching.fetcher-base@1100.1.8
+  - @pnpm/resolving.git-resolver@1100.1.4
+
+## 1101.0.11
+
+### Patch Changes
+
+- Updated dependencies [3b76b8e]
+  - @pnpm/worker@1100.1.9
+  - @pnpm/exec.prepare-package@1100.0.15
+  - @pnpm/fetching.fetcher-base@1100.1.7
+
 ## 1101.0.10
 
 ### Patch Changes

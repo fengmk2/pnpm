@@ -37,6 +37,7 @@ export interface StrictInstallOptions {
   cleanupUnusedCatalogs: boolean
   frozenLockfile: boolean
   frozenLockfileIfExists: boolean
+  frozenStore: boolean
   enableGlobalVirtualStore: boolean
   enablePnp: boolean
   extraBinPaths: string[]
@@ -64,6 +65,13 @@ export interface StrictInstallOptions {
   preferFrozenLockfile: boolean
   saveWorkspaceProtocol: boolean | 'rolling'
   lockfileCheck?: (prev: LockfileObject, next: LockfileObject) => void
+  /**
+   * When true, resolve fully but write nothing to disk (no lockfile, no
+   * `node_modules`). The before/after wanted lockfiles are returned in the
+   * install result's `dryRunResult` so the caller can report what an install
+   * would change. Powers `pnpm install --dry-run`.
+   */
+  dryRun?: boolean
   lockfileIncludeTarballUrl?: boolean
   preferWorkspacePackages: boolean
   preserveWorkspaceProtocol: boolean
@@ -234,21 +242,30 @@ export interface StrictInstallOptions {
   packageVulnerabilityAudit?: PackageVulnerabilityAudit
   blockExoticSubdeps?: boolean
   /**
-   * Optional alternative install engine. When set, the frozen-install
-   * path invokes this callback instead of `headlessInstall`. The CLI
-   * layer constructs it (today: spawning the pacquet binary installed
-   * via `configDependencies` and forwarding pnpm's own CLI argv); the
-   * installer treats it as an opaque "do the install" hook so it
-   * doesn't need to know about pacquet's binary path, CLI surface, or
-   * any settings that only pacquet consumes.
+   * Optional alternative install engine. When set, the installer
+   * delegates the install to `run` instead of calling `headlessInstall`.
+   * The CLI layer constructs it (today: the pacquet binary installed via
+   * `configDependencies`, forwarding pnpm's own CLI argv); the installer
+   * treats it as an opaque "do the install" hook so it doesn't need to
+   * know about pacquet's binary path, CLI surface, or any settings that
+   * only pacquet consumes.
    *
-   * `filterResolvedProgress` tells the helper to drop the engine's
-   * own `pnpm:progress status:resolved` events because pnpm already
-   * emitted one per package during a preceding lockfileOnly resolve
-   * pass. The frozen-install path passes `false` (or nothing): no
-   * resolve pass ran, so the engine's events are the only source.
+   * `supportsResolution` is `true` when the engine can resolve
+   * dependencies itself (pacquet >= 0.11.7). When `false` the installer
+   * runs its own resolve pass first and the engine only materializes the
+   * written lockfile.
+   *
+   * `run`'s `filterResolvedProgress` tells the helper to drop the
+   * engine's own `pnpm:progress status:resolved` events because pnpm
+   * already emitted one per package during a preceding lockfileOnly
+   * resolve pass. `resolve` tells the engine to do the resolution
+   * itself (non-frozen install). The frozen/materialize paths leave
+   * both unset.
    */
-  runPacquet?: (opts?: { filterResolvedProgress?: boolean }) => Promise<void>
+  runPacquet?: {
+    supportsResolution: boolean
+    run: (opts?: { filterResolvedProgress?: boolean, resolve?: boolean }) => Promise<void>
+  }
   /**
    * If true, `mutateModules` does not emit the per-install `summary` log
    * event. Used by `pnpm add -g` when it runs multiple isolated installs
@@ -257,11 +274,10 @@ export interface StrictInstallOptions {
    */
   omitSummaryLog: boolean
   /**
-   * URL of an agent server that resolves dependencies server-side and serves
-   * only the files missing from the client's store. The `pnpr` server
-   * implements this protocol.
+   * URL of a pnpr server that resolves dependencies server-side and serves
+   * only the files missing from the client's store.
    */
-  agent?: string
+  pnprServer?: string
 }
 
 export type InstallOptions =
@@ -290,6 +306,7 @@ const defaults = (opts: InstallOptions): StrictInstallOptions => {
     force: false,
     forceFullResolution: false,
     frozenLockfile: false,
+    frozenStore: false,
     hoistPattern: undefined,
     publicHoistPattern: undefined,
     hooks: {},
@@ -417,6 +434,18 @@ export function extendOptions (
       throw new PnpmError('CONFIG_CONFLICT_LOCKFILE_ONLY_WITH_NO_LOCKFILE',
         `Cannot generate a ${WANTED_LOCKFILE} because lockfile is set to false`)
     }
+  }
+  if (extendedOpts.frozenStore && extendedOpts.force) {
+    throw new PnpmError('CONFIG_CONFLICT_FROZEN_STORE_WITH_FORCE',
+      'Cannot use force together with frozenStore: --force re-imports packages into the store, which is opened read-only when frozenStore is enabled')
+  }
+  if (extendedOpts.frozenStore) {
+    // The side-effects cache is written into the store, which frozenStore opens
+    // read-only. Caching is an optimization, not a correctness requirement, so
+    // force it off rather than failing (the writable seed-build already
+    // populated it). Without this, a build under frozenStore (e.g. with the
+    // global virtual store disabled) would attempt a store write.
+    extendedOpts.sideEffectsCacheWrite = false
   }
   if (extendedOpts.userAgent.startsWith('npm/')) {
     extendedOpts.userAgent = `${extendedOpts.packageManager.name}/${extendedOpts.packageManager.version} ${extendedOpts.userAgent}`

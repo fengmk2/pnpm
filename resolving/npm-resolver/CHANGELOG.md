@@ -1,5 +1,108 @@
 # @pnpm/npm-resolver
 
+## 1102.0.0
+
+### Patch Changes
+
+- 61810aa: Added a new setting `frozenStore` (`--frozen-store`) that lets `pnpm install` run against a package store on a read-only filesystem (e.g. a Nix store, a read-only bind mount, an OCI layer). When enabled, pnpm opens the store's SQLite `index.db` through the `immutable=1` URI — bypassing the WAL/`-shm` sidecar creation that otherwise fails on a read-only directory — and suppresses every store-write path (the `index.db` writer and the project-registry write). Pair it with `--offline --frozen-lockfile` against a fully-populated store. Under the global virtual store, package directories live inside the store, so if the store is missing the build output of a package whose lifecycle scripts are approved (or that has a patch), pnpm fails up front with `ERR_PNPM_FROZEN_STORE_NEEDS_BUILD` rather than crashing mid-build on a read-only write — seed the store with those builds first. Incompatible with `--force` and with a configured pnpr server, since both write into the store; the side-effects cache is likewise not written under `frozenStore`. If the store is missing its content directory, the install fails fast with `ERR_PNPM_FROZEN_STORE_INCOMPLETE` rather than attempting to initialize it. The read-only `immutable=1` open requires Node.js >=22.15.0, >=23.11.0, or >=24.0.0; on older runtimes `--frozen-store` fails with a clear `ERR_PNPM_FROZEN_STORE_UNSUPPORTED_NODE` error. Bin-linking also tolerates a read-only store: under the global virtual store a package's bin source lives inside the store, so the `chmod` that makes it executable would be refused — with `EPERM`/`EACCES`, or with `EROFS` on a genuinely read-only filesystem. That `chmod` is redundant when the seed already ships its bins executable with a normalized shebang, so it is now skipped in that case, while a non-executable bin (or one still carrying a Windows CRLF shebang) on a read-only store still errors.
+- 681b593: pnpm can now use different auth tokens for different package scopes, even when those scopes use the same registry URL.
+
+  Previously, auth was selected only by registry URL. If `@org-a` and `@org-b` both used `https://npm.pkg.github.com/`, they had to share the same token. This caused problems for registries that issue tokens per organization or per scope.
+
+  Configure a scope-specific token by adding the package scope after the registry URL in the auth key:
+
+  ```ini
+  @org-a:registry=https://npm.pkg.github.com/
+  @org-b:registry=https://npm.pkg.github.com/
+
+  //npm.pkg.github.com/:@org-a:_authToken=${ORG_A_TOKEN}
+  //npm.pkg.github.com/:@org-b:_authToken=${ORG_B_TOKEN}
+
+  //npm.pkg.github.com/:_authToken=${FALLBACK_TOKEN}
+  ```
+
+  `pnpm login --registry=https://npm.pkg.github.com --scope=@org-a` writes the token to the same scope-specific auth key.
+
+  When installing or publishing `@org-a/*`, pnpm uses `ORG_A_TOKEN`. For `@org-b/*`, pnpm uses `ORG_B_TOKEN`. Packages without a matching scope continue to use the registry-wide fallback token.
+
+- 1310ab5: A `304 Not Modified` answer from the registry now renews the cached metadata file's mtime, so the `minimumReleaseAge` freshness shortcut keeps serving resolutions from the cache. Previously, once a cached packument grew older than `minimumReleaseAge`, every subsequent install re-validated it against the registry forever, because a 304 never rewrites the file.
+- a31faa7: Updated dependency ranges. Notably:
+
+  - `@pnpm/logger` peer dependency range moved to `^1100.0.0`.
+  - `msgpackr` 1.11.8 → 2.0.4 (store index files remain byte-compatible in both directions).
+  - `open` ^7.4.2 → ^11.0.0, `memoize` ^10 → ^11, `cli-truncate` ^5 → ^6, `pidtree` ^0.6 → ^1.
+  - `@yarnpkg/core` 4.5.0 → 4.8.0, `@rushstack/worker-pool` 0.7.7 → 0.7.18, `@cyclonedx/cyclonedx-library` 10.0.0 → 10.1.0, `@pnpm/config.nerf-dart` ^1 → ^2, `@pnpm/log.group` 3.0.2 → 4.0.1, `@pnpm/util.lex-comparator` ^3 → ^4.
+
+- Updated dependencies [61810aa]
+- Updated dependencies [681b593]
+- Updated dependencies [a31faa7]
+  - @pnpm/store.index@1100.2.0
+  - @pnpm/worker@1100.2.0
+  - @pnpm/fetching.types@1100.0.2
+  - @pnpm/types@1101.3.2
+  - @pnpm/config.version-policy@1100.1.5
+  - @pnpm/core-loggers@1100.2.1
+  - @pnpm/resolving.registry.pkg-metadata-filter@1100.0.9
+  - @pnpm/store.cafs@1100.1.10
+  - @pnpm/workspace.range-resolver@1100.0.2
+  - @pnpm/config.pick-registry-for-package@1100.0.9
+  - @pnpm/resolving.registry.types@1100.1.3
+  - @pnpm/resolving.resolver-base@1100.4.2
+  - @pnpm/crypto.hash@1100.0.1
+
+## 1101.5.2
+
+### Patch Changes
+
+- Updated dependencies [f11b4fc]
+  - @pnpm/core-loggers@1100.2.0
+  - @pnpm/worker@1100.1.11
+  - @pnpm/crypto.hash@1100.0.1
+
+## 1101.5.1
+
+### Patch Changes
+
+- Updated dependencies [089484a]
+- Updated dependencies [bf1b731]
+  - @pnpm/worker@1100.1.10
+  - @pnpm/types@1101.3.1
+  - @pnpm/config.pick-registry-for-package@1100.0.8
+  - @pnpm/config.version-policy@1100.1.4
+  - @pnpm/core-loggers@1100.1.4
+  - @pnpm/resolving.registry.types@1100.1.2
+  - @pnpm/resolving.resolver-base@1100.4.1
+  - @pnpm/store.cafs@1100.1.9
+  - @pnpm/crypto.hash@1100.0.1
+  - @pnpm/resolving.registry.pkg-metadata-filter@1100.0.8
+
+## 1101.5.0
+
+### Minor Changes
+
+- 6d17b66: The lockfile verifier now checks that a registry entry pinning an explicit `tarball` URL points at the artifact the registry's own metadata lists for that `name@version`. Previously a tampered lockfile could pair a trusted `name@version` with an attacker-chosen tarball URL (and a matching integrity for those bytes), so the install fetched the attacker's bytes. A mismatch — or any entry that can't be confirmed against the registry — is rejected with `ERR_PNPM_TARBALL_URL_MISMATCH`. Non-registry resolutions (`file:`, git-hosted, etc.) and registry entries without an explicit tarball URL (the URL is reconstructed from name+version+registry, so it is inherently bound) are unaffected; non-standard registry tarball URLs (npm Enterprise, GitHub Packages) still pass because they match the metadata.
+
+  This binding is unconditional — it runs regardless of `minimumReleaseAge`/`trustPolicy` and is not narrowed by their exclude lists, since it guards integrity rather than maturity/trust. It is **fail-closed**: an entry passes only when the registry metadata affirmatively lists the version with a matching tarball URL. If the metadata can't be fetched, doesn't list the version, or omits `dist.tarball`, the entry is rejected. As a result, an install that re-verifies a lockfile (any install whose lockfile content changed since the last verified run, where the verification cache no longer applies) now requires the configured registry to be reachable. `trustLockfile` is the opt-out for environments that treat the on-disk lockfile as already trusted.
+
+  The `minimumReleaseAge`/`trustPolicy` verification also no longer applies to URL-keyed tarball dependencies (e.g. `https:` tarballs) that carry a semver `version` copied from their manifest — those are deliberate non-registry dependencies.
+
+### Patch Changes
+
+- 722b9cd: Skip lockfile `minimumReleaseAge`/`trustPolicy` verification for non-registry tarball protocols (for example `file:`), so local tarball dependencies are not incorrectly checked against npm registry metadata.
+- Updated dependencies [3b76b8e]
+- Updated dependencies [a017bf3]
+- Updated dependencies [6d17b66]
+  - @pnpm/worker@1100.1.9
+  - @pnpm/types@1101.3.0
+  - @pnpm/resolving.resolver-base@1100.4.0
+  - @pnpm/config.pick-registry-for-package@1100.0.7
+  - @pnpm/config.version-policy@1100.1.3
+  - @pnpm/core-loggers@1100.1.3
+  - @pnpm/resolving.registry.types@1100.1.1
+  - @pnpm/store.cafs@1100.1.8
+  - @pnpm/crypto.hash@1100.0.1
+  - @pnpm/resolving.registry.pkg-metadata-filter@1100.0.7
+
 ## 1101.4.0
 
 ### Minor Changes

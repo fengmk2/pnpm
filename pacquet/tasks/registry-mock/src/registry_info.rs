@@ -19,6 +19,7 @@ pub struct RegistryInfo {
 }
 
 impl RegistryInfo {
+    #[must_use]
     pub fn url(&self) -> String {
         port_to_url(self.port)
     }
@@ -54,7 +55,7 @@ impl PreparedRegistryInfo {
     }
 
     fn delete() {
-        fs::remove_file(PreparedRegistryInfo::path()).expect("delete prepared registry info")
+        fs::remove_file(PreparedRegistryInfo::path()).expect("delete prepared registry info");
     }
 
     pub async fn launch(options: MockInstanceOptions<'_>) -> Self {
@@ -69,10 +70,12 @@ impl PreparedRegistryInfo {
         let info = RegistryInfo { port, pid };
         let prepared = PreparedRegistryInfo { info };
         prepared.save();
-        forget(mock_instance); // prevent this process from killing itself on drop
+        #[expect(clippy::mem_forget, reason = "prevent this process from killing itself on drop")]
+        forget(mock_instance);
         prepared
     }
 
+    #[must_use]
     pub fn end() -> Option<Self> {
         let prepared = PreparedRegistryInfo::try_load()?;
         let pid = prepared.info.pid;

@@ -1,5 +1,76 @@
 # @pnpm/deps.graph-builder
 
+## 1100.0.16
+
+### Patch Changes
+
+- a31faa7: Updated dependency ranges. Notably:
+
+  - `@pnpm/logger` peer dependency range moved to `^1100.0.0`.
+  - `msgpackr` 1.11.8 → 2.0.4 (store index files remain byte-compatible in both directions).
+  - `open` ^7.4.2 → ^11.0.0, `memoize` ^10 → ^11, `cli-truncate` ^5 → ^6, `pidtree` ^0.6 → ^1.
+  - `@yarnpkg/core` 4.5.0 → 4.8.0, `@rushstack/worker-pool` 0.7.7 → 0.7.18, `@cyclonedx/cyclonedx-library` 10.0.0 → 10.1.0, `@pnpm/config.nerf-dart` ^1 → ^2, `@pnpm/log.group` 3.0.2 → 4.0.1, `@pnpm/util.lex-comparator` ^3 → ^4.
+
+- Updated dependencies [f20ad8f]
+- Updated dependencies [681b593]
+- Updated dependencies [d50d691]
+- Updated dependencies [a31faa7]
+  - @pnpm/lockfile.utils@1100.0.13
+  - @pnpm/types@1101.3.2
+  - @pnpm/lockfile.fs@1100.1.5
+  - @pnpm/config.package-is-installable@1100.0.11
+  - @pnpm/core-loggers@1100.2.1
+  - @pnpm/deps.path@1100.0.8
+  - @pnpm/patching.config@1100.0.8
+  - @pnpm/deps.graph-hasher@1100.2.5
+  - @pnpm/hooks.types@1100.0.12
+  - @pnpm/installing.modules-yaml@1100.0.9
+  - @pnpm/store.controller-types@1100.1.5
+
+## 1100.0.15
+
+### Patch Changes
+
+- Updated dependencies [f11b4fc]
+- Updated dependencies [52be454]
+  - @pnpm/core-loggers@1100.2.0
+  - @pnpm/config.package-is-installable@1100.0.10
+
+## 1100.0.14
+
+### Patch Changes
+
+- bf1b731: Require trusted package identity before package-name `allowBuilds` entries can approve lifecycle scripts for git, git-hosted tarball, direct tarball, and local directory artifacts. To approve one of those artifacts explicitly, use its peer-suffix-free lockfile depPath as the `allowBuilds` key. Lockfile verification now rejects lockfiles where a registry-style dependency path (`name@semver`) is backed by a git, directory, or git-hosted tarball resolution (`ERR_PNPM_RESOLUTION_SHAPE_MISMATCH`), so the dependency path is a reliable artifact identity by the time scripts can run.
+- Updated dependencies [bf1b731]
+  - @pnpm/deps.graph-hasher@1100.2.4
+  - @pnpm/types@1101.3.1
+  - @pnpm/config.package-is-installable@1100.0.9
+  - @pnpm/core-loggers@1100.1.4
+  - @pnpm/deps.path@1100.0.7
+  - @pnpm/hooks.types@1100.0.11
+  - @pnpm/installing.modules-yaml@1100.0.8
+  - @pnpm/lockfile.fs@1100.1.4
+  - @pnpm/lockfile.utils@1100.0.12
+  - @pnpm/store.controller-types@1100.1.4
+  - @pnpm/patching.config@1100.0.7
+
+## 1100.0.13
+
+### Patch Changes
+
+- Updated dependencies [a017bf3]
+  - @pnpm/types@1101.3.0
+  - @pnpm/config.package-is-installable@1100.0.8
+  - @pnpm/core-loggers@1100.1.3
+  - @pnpm/deps.graph-hasher@1100.2.3
+  - @pnpm/deps.path@1100.0.6
+  - @pnpm/hooks.types@1100.0.10
+  - @pnpm/installing.modules-yaml@1100.0.7
+  - @pnpm/lockfile.fs@1100.1.3
+  - @pnpm/lockfile.utils@1100.0.11
+  - @pnpm/store.controller-types@1100.1.3
+  - @pnpm/patching.config@1100.0.6
+
 ## 1100.0.12
 
 ### Patch Changes

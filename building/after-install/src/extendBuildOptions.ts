@@ -23,6 +23,7 @@ export type StrictBuildOptions = {
   scriptsPrependNodePath: boolean | 'warn-only'
   shellEmulator: boolean
   skipIfHasSideEffectsCache?: boolean
+  frozenStore?: boolean
   storeDir: string // TODO: remove this property
   storeController: StoreController
   force: boolean
@@ -47,6 +48,9 @@ export type StrictBuildOptions = {
   shamefullyHoist: boolean
   deployAllFiles: boolean
   allowBuilds?: Record<string, boolean | string>
+  enableGlobalVirtualStore?: boolean
+  globalVirtualStoreDir?: string
+  virtualStoreDir?: string
   virtualStoreDirMaxLength: number
   peersSuffixMaxLength: number
   strictStorePkgContentCheck: boolean
@@ -106,5 +110,15 @@ export async function extendBuildOptions (
     storeDir: defaultOpts.storeDir,
   }
   extendedOpts.registries = normalizeRegistries(extendedOpts.registries)
+  // Mirror extendInstallOptions: under a global virtual store, the virtual
+  // store directory is `<storeDir>/links`, not the per-project
+  // `node_modules/.pnpm`. Without this, getContext() in the build step
+  // defaults virtualStoreDir to the local `.pnpm` and writeModulesManifest
+  // overwrites the correct value the install step recorded — which makes the
+  // next install in that project detect a virtual-store mismatch and prompt
+  // to purge node_modules.
+  if (extendedOpts.enableGlobalVirtualStore && extendedOpts.virtualStoreDir == null) {
+    extendedOpts.virtualStoreDir = extendedOpts.globalVirtualStoreDir ?? path.join(extendedOpts.storeDir, 'links')
+  }
   return extendedOpts
 }

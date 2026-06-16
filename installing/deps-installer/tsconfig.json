@@ -25,9 +25,6 @@
       "path": "../../__utils__/test-ipc-server"
     },
     {
-      "path": "../../agent/client"
-    },
-    {
       "path": "../../bins/linker"
     },
     {
@@ -41,6 +38,9 @@
     },
     {
       "path": "../../building/policy"
+    },
+    {
+      "path": "../../catalogs/config"
     },
     {
       "path": "../../catalogs/protocol-parser"
@@ -136,6 +136,9 @@
       "path": "../../lockfile/walker"
     },
     {
+      "path": "../../network/auth-header"
+    },
+    {
       "path": "../../network/git-utils"
     },
     {
@@ -146,6 +149,9 @@
     },
     {
       "path": "../../pkg-manifest/utils"
+    },
+    {
+      "path": "../../pnpr/client"
     },
     {
       "path": "../../resolving/parse-wanted-dependency"

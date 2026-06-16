@@ -1,5 +1,26 @@
 # @pnpm/write-project-manifest
 
+## 1100.0.8
+
+### Patch Changes
+
+- Updated dependencies [681b593]
+  - @pnpm/types@1101.3.2
+
+## 1100.0.7
+
+### Patch Changes
+
+- Updated dependencies [bf1b731]
+  - @pnpm/types@1101.3.1
+
+## 1100.0.6
+
+### Patch Changes
+
+- Updated dependencies [a017bf3]
+  - @pnpm/types@1101.3.0
+
 ## 1100.0.5
 
 ### Patch Changes

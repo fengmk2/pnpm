@@ -1,5 +1,35 @@
 # @pnpm/assert-store
 
+## 1100.0.16
+
+### Patch Changes
+
+- Updated dependencies [61810aa]
+- Updated dependencies [a31faa7]
+  - @pnpm/store.index@1100.2.0
+  - @pnpm/store.cafs@1100.1.10
+  - @pnpm/testing.registry-mock@1100.0.6
+
+## 1100.0.15
+
+### Patch Changes
+
+- @pnpm/testing.registry-mock@1100.0.5
+
+## 1100.0.14
+
+### Patch Changes
+
+- @pnpm/store.cafs@1100.1.9
+- @pnpm/testing.registry-mock@1100.0.4
+
+## 1100.0.13
+
+### Patch Changes
+
+- @pnpm/testing.registry-mock@1100.0.3
+- @pnpm/store.cafs@1100.1.8
+
 ## 1100.0.12
 
 ### Patch Changes

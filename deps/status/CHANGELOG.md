@@ -1,5 +1,89 @@
 # @pnpm/deps.status
 
+## 1100.1.1
+
+### Patch Changes
+
+- a31faa7: Updated dependency ranges. Notably:
+
+  - `@pnpm/logger` peer dependency range moved to `^1100.0.0`.
+  - `msgpackr` 1.11.8 → 2.0.4 (store index files remain byte-compatible in both directions).
+  - `open` ^7.4.2 → ^11.0.0, `memoize` ^10 → ^11, `cli-truncate` ^5 → ^6, `pidtree` ^0.6 → ^1.
+  - `@yarnpkg/core` 4.5.0 → 4.8.0, `@rushstack/worker-pool` 0.7.7 → 0.7.18, `@cyclonedx/cyclonedx-library` 10.0.0 → 10.1.0, `@pnpm/config.nerf-dart` ^1 → ^2, `@pnpm/log.group` 3.0.2 → 4.0.1, `@pnpm/util.lex-comparator` ^3 → ^4.
+
+- Updated dependencies [61810aa]
+- Updated dependencies [681b593]
+- Updated dependencies [d50d691]
+- Updated dependencies [a31faa7]
+  - @pnpm/config.reader@1101.9.0
+  - @pnpm/installing.context@1100.0.18
+  - @pnpm/types@1101.3.2
+  - @pnpm/lockfile.fs@1100.1.5
+  - @pnpm/lockfile.verification@1100.0.18
+  - @pnpm/workspace.projects-reader@1101.0.12
+  - @pnpm/workspace.state@1100.0.22
+  - @pnpm/resolving.resolver-base@1100.4.2
+  - @pnpm/workspace.workspace-manifest-reader@1100.0.8
+  - @pnpm/lockfile.settings-checker@1100.0.18
+
+## 1100.1.0
+
+### Minor Changes
+
+- d976edf: `pnpm install` completes without re-resolving when `pnpm-lock.yaml` was deleted but `node_modules` is intact: the up-to-date check now treats the current lockfile (`node_modules/.pnpm/lock.yaml`) — the record of what the previous install materialized — as the wanted lockfile, verifies the manifests still match it, restores `pnpm-lock.yaml` from it, and reports "Already up to date". Previously this scenario triggered a full resolution and a re-verification of every locked package against the registry.
+
+### Patch Changes
+
+- Updated dependencies [bc9ed78]
+- Updated dependencies [615c669]
+  - @pnpm/config.reader@1101.8.0
+  - @pnpm/workspace.state@1100.0.21
+  - @pnpm/installing.context@1100.0.17
+  - @pnpm/lockfile.verification@1100.0.17
+  - @pnpm/workspace.projects-reader@1101.0.11
+  - @pnpm/lockfile.settings-checker@1100.0.17
+
+## 1100.0.23
+
+### Patch Changes
+
+- 97e1982: Fix `pnpm install` ignoring `enableGlobalVirtualStore` toggle by including it in the workspace state settings check [#12142](https://github.com/pnpm/pnpm/issues/12142).
+- Updated dependencies [822beb5]
+- Updated dependencies [3537020]
+- Updated dependencies [894ea6a]
+- Updated dependencies [6b5d91a]
+- Updated dependencies [027196b]
+- Updated dependencies [97e1982]
+- Updated dependencies [1017c36]
+- Updated dependencies [bf1b731]
+  - @pnpm/config.reader@1101.7.0
+  - @pnpm/workspace.state@1100.0.20
+  - @pnpm/types@1101.3.1
+  - @pnpm/installing.context@1100.0.16
+  - @pnpm/lockfile.fs@1100.1.4
+  - @pnpm/lockfile.verification@1100.0.16
+  - @pnpm/resolving.resolver-base@1100.4.1
+  - @pnpm/workspace.projects-reader@1101.0.10
+  - @pnpm/workspace.workspace-manifest-reader@1100.0.7
+  - @pnpm/lockfile.settings-checker@1100.0.16
+
+## 1100.0.22
+
+### Patch Changes
+
+- Updated dependencies [a017bf3]
+- Updated dependencies [6d17b66]
+  - @pnpm/config.reader@1101.6.0
+  - @pnpm/types@1101.3.0
+  - @pnpm/resolving.resolver-base@1100.4.0
+  - @pnpm/workspace.state@1100.0.19
+  - @pnpm/installing.context@1100.0.15
+  - @pnpm/lockfile.fs@1100.1.3
+  - @pnpm/lockfile.verification@1100.0.15
+  - @pnpm/workspace.projects-reader@1101.0.9
+  - @pnpm/workspace.workspace-manifest-reader@1100.0.6
+  - @pnpm/lockfile.settings-checker@1100.0.15
+
 ## 1100.0.21
 
 ### Patch Changes

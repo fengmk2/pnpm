@@ -8,7 +8,6 @@ type PnpmKey = keyof typeof pnpmTypes
  * Keys from {@link pnpmTypes} that are valid fields in a global config file.
  */
 export const pnpmConfigFileKeys = [
-  'agent',
   'bail',
   'ci',
   'color',
@@ -23,6 +22,7 @@ export const pnpmConfigFileKeys = [
   'fetch-warn-timeout-ms',
   'fetch-min-speed-ki-bps',
   'fetching-concurrency',
+  'frozen-store',
   'git-checks',
   'git-shallow-hosts',
   'global-bin-dir',
@@ -47,6 +47,7 @@ export const pnpmConfigFileKeys = [
   'npm-path',
   'npmrc-auth-file',
   'package-import-method',
+  'pnpr-server',
   'prefer-frozen-lockfile',
   'prefer-offline',
   'prefer-symlinked-executables',

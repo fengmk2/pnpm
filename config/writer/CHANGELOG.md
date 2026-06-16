@@ -1,5 +1,30 @@
 # @pnpm/config.config-writer
 
+## 1100.0.13
+
+### Patch Changes
+
+- Updated dependencies [681b593]
+- Updated dependencies [a31faa7]
+  - @pnpm/types@1101.3.2
+  - @pnpm/workspace.workspace-manifest-writer@1100.0.13
+
+## 1100.0.12
+
+### Patch Changes
+
+- Updated dependencies [bf1b731]
+  - @pnpm/types@1101.3.1
+  - @pnpm/workspace.workspace-manifest-writer@1100.0.12
+
+## 1100.0.11
+
+### Patch Changes
+
+- Updated dependencies [a017bf3]
+  - @pnpm/types@1101.3.0
+  - @pnpm/workspace.workspace-manifest-writer@1100.0.11
+
 ## 1100.0.10
 
 ### Patch Changes

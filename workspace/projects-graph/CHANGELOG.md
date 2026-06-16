@@ -1,5 +1,41 @@
 # @pnpm/workspace.pkgs-graph
 
+## 1100.0.18
+
+### Patch Changes
+
+- Updated dependencies [61810aa]
+- Updated dependencies [681b593]
+- Updated dependencies [1310ab5]
+- Updated dependencies [a31faa7]
+  - @pnpm/resolving.npm-resolver@1102.0.0
+  - @pnpm/types@1101.3.2
+  - @pnpm/workspace.range-resolver@1100.0.2
+
+## 1100.0.17
+
+### Patch Changes
+
+- @pnpm/resolving.npm-resolver@1101.5.2
+
+## 1100.0.16
+
+### Patch Changes
+
+- Updated dependencies [bf1b731]
+  - @pnpm/types@1101.3.1
+  - @pnpm/resolving.npm-resolver@1101.5.1
+
+## 1100.0.15
+
+### Patch Changes
+
+- Updated dependencies [a017bf3]
+- Updated dependencies [722b9cd]
+- Updated dependencies [6d17b66]
+  - @pnpm/types@1101.3.0
+  - @pnpm/resolving.npm-resolver@1101.5.0
+
 ## 1100.0.14
 
 ### Patch Changes

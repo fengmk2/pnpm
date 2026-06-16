@@ -17,8 +17,8 @@
 //! [`config/reader/src/index.ts:719-722`](https://github.com/pnpm/pnpm/blob/2a9bd897bf/config/reader/src/index.ts#L719-L722).
 
 use crate::{
-    HoistingLimits, NodeLinker, PackageImportMethod, ResolutionMode, ScriptsPrependNodePath,
-    TrustPolicy, WorkspaceSettings, api::EnvVar,
+    CatalogMode, HoistingLimits, NodeLinker, PackageImportMethod, ResolutionMode,
+    ScriptsPrependNodePath, TrustPolicy, WorkspaceSettings, api::EnvVar,
 };
 use serde::de::DeserializeOwned;
 
@@ -78,6 +78,7 @@ impl WorkspaceSettings {
     /// settings via [`Self::apply_to`] *after* `pnpm-workspace.yaml` so
     /// env vars win over yaml, mirroring upstream's order at
     /// [`config/reader/src/index.ts:471-488`](https://github.com/pnpm/pnpm/blob/2a9bd897bf/config/reader/src/index.ts#L471-L488).
+    #[must_use]
     pub fn from_pnpm_config_env<Sys: EnvVar>() -> Self {
         let mut settings = WorkspaceSettings::default();
 
@@ -161,6 +162,7 @@ impl WorkspaceSettings {
         json_field!(prefer_workspace_packages, "PREFER_WORKSPACE_PACKAGES");
         json_field!(dedupe_injected_deps, "DEDUPE_INJECTED_DEPS");
         json_field!(strict_peer_dependencies, "STRICT_PEER_DEPENDENCIES");
+        json_field!(ignore_compatibility_db, "IGNORE_COMPATIBILITY_DB");
         json_field!(resolve_peers_from_workspace_root, "RESOLVE_PEERS_FROM_WORKSPACE_ROOT");
         json_field!(block_exotic_subdeps, "BLOCK_EXOTIC_SUBDEPS");
         json_field!(verify_store_integrity, "VERIFY_STORE_INTEGRITY");
@@ -176,6 +178,8 @@ impl WorkspaceSettings {
         json_field!(patched_dependencies, "PATCHED_DEPENDENCIES");
         json_field!(allow_builds, "ALLOW_BUILDS");
         json_field!(dangerously_allow_all_builds, "DANGEROUSLY_ALLOW_ALL_BUILDS");
+        json_field!(strict_dep_builds, "STRICT_DEP_BUILDS");
+        json_field!(ignore_scripts, "IGNORE_SCRIPTS");
         enum_field!(scripts_prepend_node_path, "SCRIPTS_PREPEND_NODE_PATH", ScriptsPrependNodePath);
         json_field!(enable_pre_post_scripts, "ENABLE_PRE_POST_SCRIPTS");
         tri_string_field!(script_shell, "SCRIPT_SHELL");
@@ -202,6 +206,7 @@ impl WorkspaceSettings {
         json_field!(trust_policy_exclude, "TRUST_POLICY_EXCLUDE");
         json_field!(trust_policy_ignore_after, "TRUST_POLICY_IGNORE_AFTER");
         enum_field!(resolution_mode, "RESOLUTION_MODE", ResolutionMode);
+        enum_field!(catalog_mode, "CATALOG_MODE", CatalogMode);
         json_field!(registry_supports_time_field, "REGISTRY_SUPPORTS_TIME_FIELD");
         json_field!(allowed_deprecated_versions, "ALLOWED_DEPRECATED_VERSIONS");
         json_field!(update_config, "UPDATE_CONFIG");

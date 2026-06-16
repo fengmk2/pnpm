@@ -1,6 +1,6 @@
 {
   "name": "@pnpm/installing.deps-installer",
-  "version": "1101.6.1",
+  "version": "1102.0.0",
   "description": "Fast, disk space efficient installation engine",
   "keywords": [
     "pnpm",
@@ -53,16 +53,18 @@
     "test": "pn compile && pn .test",
     "prepublishOnly": "tsgo --build",
     "compile": "tsgo --build && pn lint --fix",
-    ".test": "cross-env PNPM_REGISTRY_MOCK_PORT=7769 NODE_OPTIONS=\"$NODE_OPTIONS --experimental-vm-modules --disable-warning=ExperimentalWarning --disable-warning=DEP0169\" jest"
+    ".test": "pn .test:heavy && pn .test:rest",
+    ".test:heavy": "cross-env PNPM_REGISTRY_MOCK_PORT=7769 NODE_OPTIONS=\"$NODE_OPTIONS --experimental-vm-modules --disable-warning=ExperimentalWarning --disable-warning=DEP0169\" jest test/install/deepRecursive.ts",
+    ".test:rest": "cross-env PNPM_REGISTRY_MOCK_PORT=7769 NODE_OPTIONS=\"$NODE_OPTIONS --experimental-vm-modules --disable-warning=ExperimentalWarning --disable-warning=DEP0169\" jest \"^(?!.*deepRecursive)\""
   },
   "dependencies": {
     "@inquirer/prompts": "catalog:",
-    "@pnpm/agent.client": "workspace:*",
     "@pnpm/bins.linker": "workspace:*",
     "@pnpm/bins.remover": "workspace:*",
     "@pnpm/building.after-install": "workspace:*",
     "@pnpm/building.during-install": "workspace:*",
     "@pnpm/building.policy": "workspace:*",
+    "@pnpm/catalogs.config": "workspace:*",
     "@pnpm/catalogs.protocol-parser": "workspace:*",
     "@pnpm/catalogs.resolver": "workspace:*",
     "@pnpm/catalogs.types": "workspace:*",
@@ -99,9 +101,11 @@
     "@pnpm/lockfile.utils": "workspace:*",
     "@pnpm/lockfile.verification": "workspace:*",
     "@pnpm/lockfile.walker": "workspace:*",
+    "@pnpm/network.auth-header": "workspace:*",
     "@pnpm/npm-package-arg": "catalog:",
     "@pnpm/patching.config": "workspace:*",
     "@pnpm/pkg-manifest.utils": "workspace:*",
+    "@pnpm/pnpr.client": "workspace:*",
     "@pnpm/resolving.parse-wanted-dependency": "workspace:*",
     "@pnpm/resolving.resolver-base": "workspace:*",
     "@pnpm/store.controller-types": "workspace:*",
@@ -155,7 +159,6 @@
     "execa": "catalog:",
     "exists-link": "catalog:",
     "is-windows": "catalog:",
-    "nock": "catalog:",
     "path-name": "catalog:",
     "read-yaml-file": "catalog:",
     "resolve-link-target": "catalog:",
@@ -167,6 +170,7 @@
     "node": ">=22.13"
   },
   "jest": {
+    "collectCoverage": false,
     "preset": "@pnpm/jest-config/with-registry"
   }
 }

@@ -132,6 +132,7 @@ export { whichVersionIsPinned } from './whichVersionIsPinned.js'
 export interface ResolverFactoryOptions {
   cacheDir: string
   storeDir?: string
+  frozenStore?: boolean
   fullMetadata?: boolean
   filterMetadata?: boolean
   offline?: boolean
@@ -238,6 +239,7 @@ export function createNpmResolver (
         {
           storeDir,
           verifyStoreIntegrity: false,
+          frozenStore: opts.frozenStore,
         },
         filesIndexFile,
         {
@@ -359,7 +361,7 @@ function createResolveLatest (
 
 export interface ResolveFromNpmContext {
   pickPackage: (spec: RegistryPackageSpec, opts: PickPackageOptions) => ReturnType<typeof pickPackage>
-  getAuthHeaderValueByURI: (registry: string) => string | undefined
+  getAuthHeaderValueByURI: GetAuthHeader
   registries: Registries
   namedRegistries: Record<string, string>
   namedRegistryNames: ReadonlySet<string>
@@ -490,7 +492,7 @@ async function resolveNpm (
     }
   }
 
-  const authHeaderValue = ctx.getAuthHeaderValueByURI(registry)
+  const authHeaderValue = ctx.getAuthHeaderValueByURI(registry, { pkgName: spec.name })
   let pickResult!: { meta: PackageMeta, pickedPackage: PackageInRegistry | null }
   try {
     pickResult = await ctx.pickPackage(spec, {
@@ -728,7 +730,7 @@ async function pickFromSimpleRegistry (
   publishedAt?: string
   policyViolation?: ResolutionPolicyViolation
 }> {
-  const authHeaderValue = ctx.getAuthHeaderValueByURI(registry)
+  const authHeaderValue = ctx.getAuthHeaderValueByURI(registry, { pkgName: spec.name })
   const { meta, pickedPackage } = await ctx.pickPackage(spec, {
     pickLowestVersion: opts.pickLowestVersion,
     publishedBy: opts.publishedBy,

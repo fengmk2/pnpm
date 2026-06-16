@@ -250,7 +250,7 @@ fn link_bins_propagates_parse_manifest_error() {
 /// [`link_bins`] must idempotently short-circuit when an existing shim
 /// already targets the same bin file. Pins [`is_shim_pointing_at`]'s
 /// integration with the writer. Mirrors pnpm's
-/// "linkBins() skips bins that already reference the correct target":
+/// "`linkBins()` skips bins that already reference the correct target":
 /// <https://github.com/pnpm/pnpm/blob/4750fd370c/bins/linker/test/index.ts#L79-L99>.
 #[test]
 fn link_bins_skips_existing_shim_with_matching_marker() {
@@ -1269,6 +1269,55 @@ fn link_node_bin_hardlinks_node_exe_on_windows() {
     assert!(
         !bin_target.join("node.ps1").exists(),
         ".ps1 shim must not be written for the node special case",
+    );
+}
+
+/// Windows-only: when `node.exe` already has identical content to the
+/// source binary (e.g. a prior copy-fallback install), the linker must
+/// leave it in place instead of removing and relinking it. Exercises the
+/// content-comparison fallback, since the pre-existing copy has a different
+/// file identity than the source. Mirrors pnpm's same-file early-return at
+/// <https://github.com/pnpm/pnpm/blob/06d2d3deb2/bins/linker/src/index.ts#L281-L308>.
+#[cfg(windows)]
+#[test]
+fn link_node_bin_skips_relink_when_node_exe_already_correct() {
+    use same_file::Handle;
+    let tmp = tempdir().unwrap();
+    let bin_target = tmp.path().join("bin_target");
+    create_dir_all(&bin_target).unwrap();
+    let node_dir = tmp.path().join("node_pkg");
+    create_dir_all(&node_dir).unwrap();
+    write_file(node_dir.join("node.exe"), "fake-node-binary").unwrap();
+    // Pre-place an independent copy with identical content (a different file
+    // identity), as an earlier copy-fallback install would leave behind.
+    write_file(bin_target.join("node.exe"), "fake-node-binary").unwrap();
+
+    write_file(
+        node_dir.join("package.json"),
+        json!({"name": "node", "version": "20.0.0", "bin": {"node": "node.exe"}}).to_string(),
+    )
+    .unwrap();
+    let manifest: Value =
+        serde_json::from_slice(&read_file(node_dir.join("package.json")).unwrap()).unwrap();
+    link_bins_of_packages::<Host>(
+        &[PackageBinSource::new(node_dir.clone(), Arc::new(manifest))],
+        &bin_target,
+    )
+    .unwrap();
+
+    let exe = bin_target.join("node.exe");
+    assert_eq!(read_to_string(&exe).unwrap(), "fake-node-binary");
+    // The pre-existing copy is left in place rather than removed and relinked:
+    // node.exe must not become a hardlink to the source binary. When file
+    // identity can't be obtained (the production code tolerates this), treat
+    // them as distinct rather than panicking on a failed handle lookup.
+    let relinked_to_source = matches!(
+        (Handle::from_path(&exe), Handle::from_path(node_dir.join("node.exe"))),
+        (Ok(exe_handle), Ok(source_handle)) if exe_handle == source_handle,
+    );
+    assert!(
+        !relinked_to_source,
+        "node.exe must stay the independent copy, not be relinked to the source",
     );
 }
 

@@ -1,5 +1,51 @@
 # @pnpm/package-is-installable
 
+## 1100.0.11
+
+### Patch Changes
+
+- a31faa7: Updated dependency ranges. Notably:
+
+  - `@pnpm/logger` peer dependency range moved to `^1100.0.0`.
+  - `msgpackr` 1.11.8 → 2.0.4 (store index files remain byte-compatible in both directions).
+  - `open` ^7.4.2 → ^11.0.0, `memoize` ^10 → ^11, `cli-truncate` ^5 → ^6, `pidtree` ^0.6 → ^1.
+  - `@yarnpkg/core` 4.5.0 → 4.8.0, `@rushstack/worker-pool` 0.7.7 → 0.7.18, `@cyclonedx/cyclonedx-library` 10.0.0 → 10.1.0, `@pnpm/config.nerf-dart` ^1 → ^2, `@pnpm/log.group` 3.0.2 → 4.0.1, `@pnpm/util.lex-comparator` ^3 → ^4.
+
+- Updated dependencies [681b593]
+- Updated dependencies [a31faa7]
+  - @pnpm/types@1101.3.2
+  - @pnpm/core-loggers@1100.2.1
+  - @pnpm/engine.runtime.system-version@1100.0.3
+  - @pnpm/cli.meta@1100.0.8
+
+## 1100.0.10
+
+### Patch Changes
+
+- 52be454: Platform-specific optional dependencies are now skipped even when their `os`/`cpu`/`libc` fields are missing from the registry metadata or the lockfile. Some registries strip these fields from the package metadata, which made pnpm download and install the binaries of every platform regardless of `supportedArchitectures`. The missing platform fields of an optional dependency are now inferred from its name (e.g. `@nx/nx-win32-arm64-msvc` → `os: win32`, `cpu: arm64`), so foreign-platform binaries are skipped without even downloading them [#11702](https://github.com/pnpm/pnpm/issues/11702).
+- Updated dependencies [f11b4fc]
+  - @pnpm/core-loggers@1100.2.0
+
+## 1100.0.9
+
+### Patch Changes
+
+- Updated dependencies [bf1b731]
+  - @pnpm/types@1101.3.1
+  - @pnpm/cli.meta@1100.0.7
+  - @pnpm/core-loggers@1100.1.4
+  - @pnpm/engine.runtime.system-version@1100.0.2
+
+## 1100.0.8
+
+### Patch Changes
+
+- Updated dependencies [a017bf3]
+  - @pnpm/types@1101.3.0
+  - @pnpm/cli.meta@1100.0.6
+  - @pnpm/core-loggers@1100.1.3
+  - @pnpm/engine.runtime.system-version@1100.0.1
+
 ## 1100.0.7
 
 ### Patch Changes

@@ -124,9 +124,29 @@ export async function handler (
     lines.push(chalk.underline.blue(info.homepage))
   }
 
+  if (info.deprecated) {
+    lines.push('')
+    lines.push(`${chalk.red('DEPRECATED!')} - ${info.deprecated}`)
+  }
+
   if (info.keywords && info.keywords.length > 0) {
     lines.push('')
     lines.push(`keywords: ${chalk.cyan(info.keywords.join(', '))}`)
+  }
+
+  if (info.bin) {
+    let bins: string[] = []
+    if (typeof info.bin === 'string') {
+      if (info.bin.length > 0 && info.name) {
+        bins = [info.name[0] === '@' ? info.name.slice(info.name.indexOf('/') + 1) : info.name]
+      }
+    } else {
+      bins = Object.keys(info.bin)
+    }
+    if (bins.length > 0) {
+      lines.push('')
+      lines.push(`bin: ${chalk.cyan(bins.join(', '))}`)
+    }
   }
 
   if (info.dist) {
@@ -182,7 +202,7 @@ export async function handler (
 
 function formatBytes (bytes: number): string {
   if (bytes === 0) return '0 B'
-  const k = 1024
+  const k = 1000
   const sizes = ['B', 'kB', 'MB', 'GB', 'TB', 'PB']
   const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1)
   return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i]

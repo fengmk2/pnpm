@@ -1,34 +1,27 @@
-//! Client for pnpr's server-accelerated installs.
+//! Client for pnpr's server-side resolver.
 //!
-//! Port of the TypeScript `@pnpm/agent.client` (`fetchFromPnpmRegistry`)
-//! plus the `fetch-and-write-cafs` worker. Given a set of dependencies
-//! and the client's content-addressable store, it:
+//! Given a set of dependencies, it `POST`s them to `/v1/resolve`, where
+//! the server resolves against the client's registries, verifies the
+//! input lockfile under the client's policy, and streams the result back
+//! as NDJSON: one `package` frame per resolved tarball as the server's
+//! tree walk yields it, then a terminal `done` frame carrying the full
+//! lockfile (or an `error` / `violations` frame). The caller consumes
+//! the `package` frames to begin fetching tarballs *while the server is
+//! still resolving* ([pnpm/pnpm#12234](https://github.com/pnpm/pnpm/issues/12234)),
+//! then fetches the rest in parallel like a normal install
+//! ([pnpm/pnpm#12230](https://github.com/pnpm/pnpm/issues/12230)).
 //!
-//! 1. reads the integrities already in the local store index,
-//! 2. `POST`s them with the dependencies to `/v1/install` and parses the
-//!    NDJSON response (`D` missing-file digests, `I` store-index entries,
-//!    `L` lockfile + stats, `E` error),
-//! 3. downloads the missing files from `/v1/files` and writes them
-//!    straight into the local CAFS *by digest* — no re-hashing,
-//! 4. writes the forwarded store-index entries, and
-//! 5. returns the resolved lockfile for a headless install.
-//!
-//! The response is buffered rather than streamed, and `/v1/files` is
-//! requested in a single batch; both mirror the current pnpr server and
-//! are tracked follow-ups.
+//! pnpr is a stateless resolver: it stores no tarballs and serves no file
+//! content.
 
-use std::{
-    collections::{BTreeMap, HashSet},
-    io::Read as _,
-};
+use std::collections::BTreeMap;
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use derive_more::{Display, Error, From};
-use flate2::read::GzDecoder;
+use futures_util::StreamExt as _;
 use pacquet_config::TrustPolicy;
 use pacquet_lockfile::Lockfile;
 use pacquet_lockfile_verification::{RenderedViolation, VerifyError};
-use pacquet_store_dir::{StoreDir, StoreIndex, StoreIndexWriter, decode_package_files_index};
+use pacquet_network::AuthHeadersByScope;
 use reqwest::Client;
 use serde::Deserialize;
 
@@ -43,17 +36,24 @@ pub struct PnprClient {
 }
 
 /// Inputs for a single-project resolution.
-pub struct InstallOptions<'a> {
-    /// The client's content-addressable store. Resolved files and store
-    /// index entries are written here.
-    pub store_dir: &'a StoreDir,
+#[derive(Clone)]
+pub struct ResolveOptions {
     pub dependencies: DepMap,
     pub dev_dependencies: DepMap,
+    pub optional_dependencies: DepMap,
     /// The client's default registry. The server resolves against this
     /// (and `named_registries`) rather than its own configuration.
     pub registry: String,
     /// The client's named-registry aliases.
     pub named_registries: DepMap,
+    /// The caller's forwarded upstream credentials, keyed by nerf-darted
+    /// registry URI and package scope. The `@` scope stores registry-wide
+    /// auth. Distinct from [`Self::authorization`] (pnpr identity).
+    pub auth_headers: AuthHeadersByScope,
+    /// `Authorization` for the pnpr server's own URL (`None` if it needs
+    /// none): identifies the caller to pnpr. Distinct from the upstream
+    /// creds in [`Self::auth_headers`].
+    pub authorization: Option<String>,
     /// The client's `overrides` (selector -> spec) as raw JSON, applied
     /// at resolve time server-side.
     pub overrides: Option<serde_json::Value>,
@@ -69,13 +69,6 @@ pub struct InstallOptions<'a> {
     /// `ignoreManifestCheck`: skip the manifest ↔ lockfile freshness
     /// comparison during the frozen resolve.
     pub ignore_manifest_check: bool,
-    /// `lockfileOnly`: ask the server to resolve only — return the
-    /// lockfile without fetching tarballs or computing the file diff, so
-    /// the response carries no missing files. The caller writes the
-    /// lockfile and skips materialization, mirroring pnpm's
-    /// `--lockfile-only`. See
-    /// [pnpm/pnpm#12146](https://github.com/pnpm/pnpm/issues/12146).
-    pub lockfile_only: bool,
     /// The client's effective `trustLockfile`. When `true` the server
     /// skips verifying the input lockfile (it still reuses it for
     /// resolution), mirroring the local `--trust-lockfile` opt-out.
@@ -90,30 +83,85 @@ pub struct InstallOptions<'a> {
     pub trust_policy_ignore_after: Option<u64>,
 }
 
-/// Result of [`PnprClient::install`].
+/// Inputs for `/v1/verify-lockfile`, the resolution-free trust verdict
+/// used by frozen restores that already know the local lockfile is fresh.
+#[derive(Clone)]
+pub struct VerifyLockfileOptions {
+    pub registry: String,
+    pub named_registries: DepMap,
+    pub auth_headers: AuthHeadersByScope,
+    pub authorization: Option<String>,
+    pub overrides: Option<serde_json::Value>,
+    pub lockfile: Lockfile,
+    pub trust_lockfile: bool,
+    pub minimum_release_age: Option<u64>,
+    pub minimum_release_age_exclude: Option<Vec<String>>,
+    pub minimum_release_age_ignore_missing_time: bool,
+    pub trust_policy: TrustPolicy,
+    pub trust_policy_exclude: Option<Vec<String>>,
+    pub trust_policy_ignore_after: Option<u64>,
+}
+
+impl VerifyLockfileOptions {
+    #[must_use]
+    pub fn from_resolve_options(opts: &ResolveOptions) -> Option<Self> {
+        Some(Self {
+            registry: opts.registry.clone(),
+            named_registries: opts.named_registries.clone(),
+            auth_headers: opts.auth_headers.clone(),
+            authorization: opts.authorization.clone(),
+            overrides: opts.overrides.clone(),
+            lockfile: opts.lockfile.clone()?,
+            trust_lockfile: opts.trust_lockfile,
+            minimum_release_age: opts.minimum_release_age,
+            minimum_release_age_exclude: opts.minimum_release_age_exclude.clone(),
+            minimum_release_age_ignore_missing_time: opts.minimum_release_age_ignore_missing_time,
+            trust_policy: opts.trust_policy,
+            trust_policy_exclude: opts.trust_policy_exclude.clone(),
+            trust_policy_ignore_after: opts.trust_policy_ignore_after,
+        })
+    }
+}
+
+/// Result of [`PnprClient::resolve`].
 #[must_use]
-pub struct InstallOutcome {
+pub struct ResolveOutcome {
     /// The resolved lockfile, ready for a headless install.
     pub lockfile: Lockfile,
     pub stats: Stats,
-    /// Number of file entries `/v1/files` served into the local CAFS.
-    pub files_written: usize,
-    /// Number of store-index entries written to the local index.
-    pub index_entries_written: usize,
 }
 
-/// Resolution statistics reported on the `L` line. Field names mirror
-/// the server's camelCase JSON.
+/// Resolution statistics from the response. Field names mirror the
+/// server's camelCase JSON.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Stats {
     pub total_packages: u64,
-    pub already_in_store: u64,
-    pub packages_to_fetch: u64,
-    pub files_in_new_packages: u64,
-    pub files_already_in_cafs: u64,
-    pub files_to_download: u64,
-    pub download_bytes: u64,
+}
+
+/// One resolved tarball package, surfaced from a streamed `package`
+/// frame as the server's resolution yields it. Carries exactly what the
+/// caller needs to start fetching the tarball before the full lockfile
+/// arrives.
+#[derive(Debug, Clone)]
+pub struct ResolvedPackage {
+    /// Canonical `name@version` identifier.
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    /// Subresource-integrity string (`sha512-...`).
+    pub integrity: String,
+    /// The resolver's `dist.tarball` URL.
+    pub tarball: String,
+    /// `dist.unpackedSize` from the server-side resolve, when the
+    /// registry published one. Sizes the decompression buffer exactly
+    /// and prioritizes the largest pending downloads when the
+    /// connection pool is saturated.
+    pub unpacked_size: Option<usize>,
+    /// `dist.fileCount` from the server-side resolve, when the registry
+    /// published one. The per-file term of the download priority's
+    /// pipeline-work estimate.
+    pub file_count: Option<usize>,
 }
 
 #[derive(Debug, Display, Error, From)]
@@ -187,33 +235,28 @@ impl PnprClient {
         Ok(())
     }
 
-    /// Resolve a single project against the server and materialize the
-    /// missing files + store-index entries into the local store.
-    pub async fn install(
+    /// Resolve a single project against the server and return the
+    /// resolved lockfile, ignoring the streamed per-package frames. The
+    /// server serves no file content — the caller fetches every tarball
+    /// itself. Equivalent to [`Self::resolve_streaming`] with a no-op
+    /// callback.
+    pub async fn resolve(&self, opts: ResolveOptions) -> Result<ResolveOutcome, PnprClientError> {
+        self.resolve_streaming(opts, |_| {}).await
+    }
+
+    /// Ask the server to verify a lockfile under the client's registry
+    /// and policy settings, without resolving or echoing the lockfile
+    /// back.
+    pub async fn verify_lockfile(
         &self,
-        opts: InstallOptions<'_>,
-    ) -> Result<InstallOutcome, PnprClientError> {
-        self.handshake().await?;
-
-        let store_keys = read_store_keys(opts.store_dir);
-        let store_integrities = integrities_from_keys(&store_keys);
-        let present: HashSet<&str> = store_keys.iter().map(String::as_str).collect();
-
+        opts: VerifyLockfileOptions,
+    ) -> Result<(), PnprClientError> {
         let request = serde_json::json!({
-            "projects": [{
-                "dir": ".",
-                "dependencies": opts.dependencies,
-                "devDependencies": opts.dev_dependencies,
-            }],
-            "storeIntegrities": store_integrities,
             "registry": opts.registry,
             "namedRegistries": opts.named_registries,
+            "authHeaders": opts.auth_headers,
             "overrides": opts.overrides,
             "lockfile": opts.lockfile,
-            "frozenLockfile": opts.frozen_lockfile,
-            "preferFrozenLockfile": opts.prefer_frozen_lockfile,
-            "ignoreManifestCheck": opts.ignore_manifest_check,
-            "lockfileOnly": opts.lockfile_only,
             "trustLockfile": opts.trust_lockfile,
             "minimumReleaseAge": opts.minimum_release_age,
             "minimumReleaseAgeExclude": opts.minimum_release_age_exclude,
@@ -223,178 +266,192 @@ impl PnprClient {
             "trustPolicyIgnoreAfter": opts.trust_policy_ignore_after,
         });
 
-        let response =
-            self.http.post(format!("{}v1/install", self.base_url)).json(&request).send().await?;
+        let mut post =
+            self.http.post(format!("{}v1/verify-lockfile", self.base_url)).json(&request);
+        if let Some(authorization) = opts.authorization.as_deref() {
+            post = post.header("authorization", authorization);
+        }
+        let response = post.send().await?;
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(PnprClientError::Server(format!("/v1/install returned {status}: {body}")));
-        }
-        let ndjson = response.text().await?;
-
-        let parsed = parse_install_response(&ndjson)?;
-
-        // `--lockfile-only`: pnpm fetches nothing and links nothing. A
-        // resolve-only server sends no `D`/`I` lines, but stay correct
-        // even against one that doesn't understand the flag by never
-        // touching the local store.
-        if opts.lockfile_only {
-            return Ok(InstallOutcome {
-                lockfile: parsed.lockfile,
-                stats: parsed.stats,
-                files_written: 0,
-                index_entries_written: 0,
-            });
+            return Err(PnprClientError::Server(format!(
+                "/v1/verify-lockfile returned {status}: {body}",
+            )));
         }
 
-        let files_written = self.download_files(opts.store_dir, &parsed.missing_files).await?;
-
-        let index_entries_written =
-            write_index_entries(opts.store_dir, parsed.index_entries, &present).await;
-
-        Ok(InstallOutcome {
-            lockfile: parsed.lockfile,
-            stats: parsed.stats,
-            files_written,
-            index_entries_written,
-        })
-    }
-
-    async fn download_files(
-        &self,
-        store_dir: &StoreDir,
-        digests: &[MissingFile],
-    ) -> Result<usize, PnprClientError> {
-        if digests.is_empty() {
-            return Ok(0);
-        }
-
-        let request = serde_json::json!({
-            "digests": digests
-                .iter()
-                .map(|file| serde_json::json!({
-                    "digest": file.digest,
-                    "executable": file.executable,
-                }))
-                .collect::<Vec<_>>(),
-        });
-
-        let response =
-            self.http.post(format!("{}v1/files", self.base_url)).json(&request).send().await?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(PnprClientError::Server(format!("/v1/files returned {status}: {body}")));
-        }
-
-        let raw = response.bytes().await?;
-        // The server sets `Content-Encoding: gzip`. Decompress unless the
-        // HTTP stack already did (detected via the gzip magic bytes), so
-        // the client works whether or not reqwest's `gzip` feature is on.
-        // Borrow `raw` directly when it's already decompressed.
-        let decompressed: Vec<u8>;
-        let payload: &[u8] = if raw.starts_with(&[0x1f, 0x8b]) {
-            let mut decoder = GzDecoder::new(&raw[..]);
-            let mut out = Vec::new();
-            decoder.read_to_end(&mut out)?;
-            decompressed = out;
-            &decompressed
-        } else {
-            &raw
-        };
-
-        // Guard against a server that streams entries we never asked for,
-        // which would otherwise write unbounded files into our CAFS.
-        let mut requested: HashSet<(String, bool)> =
-            digests.iter().map(|file| (file.digest.clone(), file.executable)).collect();
-
-        write_files_payload(store_dir, payload, &mut requested)
-    }
-}
-
-struct ParsedInstall {
-    lockfile: Lockfile,
-    stats: Stats,
-    missing_files: Vec<MissingFile>,
-    index_entries: Vec<(String, Vec<u8>)>,
-}
-
-struct MissingFile {
-    digest: String,
-    executable: bool,
-}
-
-fn parse_install_response(ndjson: &str) -> Result<ParsedInstall, PnprClientError> {
-    let mut missing_files = Vec::new();
-    let mut index_entries = Vec::new();
-    let mut final_line: Option<(Lockfile, Stats)> = None;
-
-    for line in ndjson.lines() {
-        let Some((tag, rest)) = line.split_once('\t') else { continue };
-        match tag {
-            "D" => {
-                // `digest \t size \t executable`
-                let mut parts = rest.split('\t');
-                let digest = parts.next().unwrap_or_default().to_string();
-                let _size = parts.next();
-                let executable = parts.next() == Some("1");
-                missing_files.push(MissingFile { digest, executable });
-            }
-            "I" => {
-                // `integrity \t pkgId \t base64`; the index key is
-                // `integrity \t pkgId` (everything before the last tab).
-                let Some((key, encoded)) = rest.rsplit_once('\t') else {
-                    return Err(PnprClientError::Protocol("malformed I line".to_string()));
-                };
-                let raw = BASE64
-                    .decode(encoded)
-                    .map_err(|err| PnprClientError::Protocol(err.to_string()))?;
-                index_entries.push((key.to_string(), raw));
-            }
-            "L" => {
-                let payload: LPayload = serde_json::from_str(rest)
-                    .map_err(|err| PnprClientError::Protocol(err.to_string()))?;
-                final_line = Some((payload.lockfile, payload.stats));
-            }
-            "E" => {
-                if let Ok(payload) = serde_json::from_str::<EPayload>(rest) {
-                    if let Some(violations) = payload.violations.filter(|list| !list.is_empty()) {
+        let mut stream = response.bytes_stream();
+        let mut buf: Vec<u8> = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            buf.extend_from_slice(&chunk?);
+            while let Some(newline) = buf.iter().position(|&byte| byte == b'\n') {
+                let line: Vec<u8> = buf.drain(..=newline).collect();
+                let line = &line[..line.len() - 1];
+                if line.is_empty() {
+                    continue;
+                }
+                match parse_verify_frame(line)? {
+                    VerifyFrame::Done => return Ok(()),
+                    VerifyFrame::Error { message } => {
+                        return Err(PnprClientError::Server(message));
+                    }
+                    VerifyFrame::Violations { violations } => {
                         return Err(PnprClientError::Verification(build_verify_error(violations)));
                     }
-                    if !payload.error.is_empty() {
-                        return Err(PnprClientError::Server(payload.error));
-                    }
                 }
-                return Err(PnprClientError::Server(rest.to_string()));
             }
-            _ => {}
         }
+
+        Err(PnprClientError::Protocol(
+            "/v1/verify-lockfile stream ended without a terminal frame".to_string(),
+        ))
     }
 
-    let (lockfile, stats) = final_line.ok_or_else(|| {
-        PnprClientError::Protocol("response had no lockfile (L line)".to_string())
-    })?;
+    /// Resolve a single project, invoking `on_package` once per resolved
+    /// tarball as its `package` frame streams in — *before* the full
+    /// lockfile arrives — so the caller can begin fetching each tarball
+    /// while the server is still resolving. Returns the resolved lockfile
+    /// from the terminal `done` frame.
+    pub async fn resolve_streaming(
+        &self,
+        opts: ResolveOptions,
+        mut on_package: impl FnMut(ResolvedPackage),
+    ) -> Result<ResolveOutcome, PnprClientError> {
+        let request = serde_json::json!({
+            "projects": [{
+                "dir": ".",
+                "dependencies": opts.dependencies,
+                "devDependencies": opts.dev_dependencies,
+                "optionalDependencies": opts.optional_dependencies,
+            }],
+            "registry": opts.registry,
+            "namedRegistries": opts.named_registries,
+            "authHeaders": opts.auth_headers,
+            "overrides": opts.overrides,
+            "lockfile": opts.lockfile,
+            "frozenLockfile": opts.frozen_lockfile,
+            "preferFrozenLockfile": opts.prefer_frozen_lockfile,
+            "ignoreManifestCheck": opts.ignore_manifest_check,
+            "trustLockfile": opts.trust_lockfile,
+            "minimumReleaseAge": opts.minimum_release_age,
+            "minimumReleaseAgeExclude": opts.minimum_release_age_exclude,
+            "minimumReleaseAgeIgnoreMissingTime": opts.minimum_release_age_ignore_missing_time,
+            "trustPolicy": opts.trust_policy,
+            "trustPolicyExclude": opts.trust_policy_exclude,
+            "trustPolicyIgnoreAfter": opts.trust_policy_ignore_after,
+        });
 
-    Ok(ParsedInstall { lockfile, stats, missing_files, index_entries })
+        let mut post = self.http.post(format!("{}v1/resolve", self.base_url)).json(&request);
+        if let Some(authorization) = opts.authorization.as_deref() {
+            post = post.header("authorization", authorization);
+        }
+        let response = post.send().await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(PnprClientError::Server(format!("/v1/resolve returned {status}: {body}")));
+        }
+
+        // Consume the NDJSON stream line by line. `package` frames feed
+        // `on_package` as they arrive (overlapping the server's
+        // resolution); the first terminal frame ends the loop. reqwest's
+        // `gzip` feature transparently inflates the byte stream if a
+        // proxy compressed it, so the frames arrive as plain JSON lines.
+        let mut stream = response.bytes_stream();
+        let mut buf: Vec<u8> = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            buf.extend_from_slice(&chunk?);
+            while let Some(newline) = buf.iter().position(|&byte| byte == b'\n') {
+                let line: Vec<u8> = buf.drain(..=newline).collect();
+                let line = &line[..line.len() - 1];
+                if line.is_empty() {
+                    continue;
+                }
+                match parse_frame(line)? {
+                    Frame::Package {
+                        id,
+                        name,
+                        version,
+                        integrity,
+                        tarball,
+                        unpacked_size,
+                        file_count,
+                    } => {
+                        on_package(ResolvedPackage {
+                            id,
+                            name,
+                            version,
+                            integrity,
+                            tarball,
+                            unpacked_size,
+                            file_count,
+                        });
+                    }
+                    Frame::Done { lockfile, stats } => {
+                        return Ok(ResolveOutcome { lockfile: *lockfile, stats });
+                    }
+                    Frame::Error { message } => return Err(PnprClientError::Server(message)),
+                    Frame::Violations { violations } => {
+                        return Err(PnprClientError::Verification(build_verify_error(violations)));
+                    }
+                }
+            }
+        }
+        Err(PnprClientError::Protocol(
+            "/v1/resolve stream ended without a terminal frame".to_string(),
+        ))
+    }
+}
+
+fn parse_frame(line: &[u8]) -> Result<Frame, PnprClientError> {
+    serde_json::from_slice(line).map_err(|err| PnprClientError::Protocol(err.to_string()))
+}
+
+fn parse_verify_frame(line: &[u8]) -> Result<VerifyFrame, PnprClientError> {
+    serde_json::from_slice(line).map_err(|err| PnprClientError::Protocol(err.to_string()))
+}
+
+/// One NDJSON frame from `/v1/resolve`. `package` frames stream as the
+/// server resolves; exactly one terminal frame (`done` / `error` /
+/// `violations`) closes the response.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum Frame {
+    Package {
+        id: String,
+        name: String,
+        version: String,
+        integrity: String,
+        tarball: String,
+        /// Absent from frames sent by servers that predate the field
+        /// and for packages whose registry never published a
+        /// `dist.unpackedSize`.
+        #[serde(rename = "unpackedSize", default)]
+        unpacked_size: Option<usize>,
+        #[serde(rename = "fileCount", default)]
+        file_count: Option<usize>,
+    },
+    /// Boxed: the lockfile dwarfs the other variants, so keeping it
+    /// behind a pointer keeps the enum small.
+    Done {
+        lockfile: Box<Lockfile>,
+        #[serde(default)]
+        stats: Stats,
+    },
+    Error {
+        message: String,
+    },
+    Violations {
+        violations: Vec<WireViolation>,
+    },
 }
 
 #[derive(Deserialize)]
-struct LPayload {
-    lockfile: Lockfile,
-    #[serde(default)]
-    stats: Stats,
-}
-
-#[derive(Deserialize)]
-struct EPayload {
-    #[serde(default)]
-    error: String,
-    /// Present when the server rejected the input lockfile under the
-    /// client's verification policy. Each entry mirrors the local
-    /// runner's rendered violation so the client can rebuild the
-    /// identical [`VerifyError`].
-    #[serde(default)]
-    violations: Option<Vec<WireViolation>>,
+#[serde(tag = "type", rename_all = "snake_case")]
+enum VerifyFrame {
+    Done,
+    Error { message: String },
+    Violations { violations: Vec<WireViolation> },
 }
 
 #[derive(Deserialize)]
@@ -413,7 +470,7 @@ fn build_verify_error(mut violations: Vec<WireViolation>) -> VerifyError {
     violations.sort_by(|left, right| {
         format!("{}@{}", left.name, left.version).cmp(&format!("{}@{}", right.name, right.version))
     });
-    let rendered = violations
+    let rendered: Vec<RenderedViolation> = violations
         .into_iter()
         .map(|violation| RenderedViolation {
             name: violation.name,
@@ -422,7 +479,7 @@ fn build_verify_error(mut violations: Vec<WireViolation>) -> VerifyError {
             reason: violation.reason,
         })
         .collect();
-    VerifyError::from_rendered(rendered)
+    VerifyError::from_rendered(&rendered)
 }
 
 /// Map a wire violation code back to the `&'static str` constant
@@ -438,169 +495,6 @@ fn intern_violation_code(code: &str) -> &'static str {
         "TARBALL_URL_MISMATCH" => "TARBALL_URL_MISMATCH",
         _ => "LOCKFILE_RESOLUTION_VERIFICATION",
     }
-}
-
-/// Decode the `/v1/files` binary payload and write each entry to the
-/// CAFS by digest. Returns the number of entries served.
-fn write_files_payload(
-    store_dir: &StoreDir,
-    payload: &[u8],
-    requested: &mut HashSet<(String, bool)>,
-) -> Result<usize, PnprClientError> {
-    if payload.len() < 4 {
-        return Err(PnprClientError::Protocol("files payload too short".to_string()));
-    }
-    let json_len = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
-    let mut offset = 4 + json_len;
-    let mut written = 0;
-
-    loop {
-        if offset + 64 > payload.len() {
-            return Err(PnprClientError::Protocol("truncated files payload".to_string()));
-        }
-        let digest_bytes = &payload[offset..offset + 64];
-        if digest_bytes.iter().all(|byte| *byte == 0) {
-            break; // end-of-stream marker
-        }
-        if offset + 69 > payload.len() {
-            return Err(PnprClientError::Protocol("truncated file header".to_string()));
-        }
-        let size = u32::from_be_bytes([
-            payload[offset + 64],
-            payload[offset + 65],
-            payload[offset + 66],
-            payload[offset + 67],
-        ]) as usize;
-        let executable = payload[offset + 68] & 0x01 != 0;
-        let content_start = offset + 69;
-        let content_end = content_start + size;
-        if content_end > payload.len() {
-            return Err(PnprClientError::Protocol("truncated file content".to_string()));
-        }
-        let content = &payload[content_start..content_end];
-        let digest = hex_encode(digest_bytes);
-
-        if !requested.remove(&(digest.clone(), executable)) {
-            return Err(PnprClientError::Server(format!(
-                "/v1/files returned an entry that was not requested: {digest}",
-            )));
-        }
-
-        write_cas_file(store_dir, &digest, executable, content)?;
-        written += 1;
-        offset = content_end;
-    }
-
-    Ok(written)
-}
-
-/// Write `content` to its content-addressed path. The digest is trusted
-/// (the fast path skips re-hashing); a complete file already on disk is
-/// left as-is, and a truncated one is replaced atomically — mirroring
-/// the TypeScript `fetch-and-write-cafs` worker.
-fn write_cas_file(
-    store_dir: &StoreDir,
-    digest: &str,
-    executable: bool,
-    content: &[u8],
-) -> Result<(), PnprClientError> {
-    let mode = if executable { 0o755 } else { 0o644 };
-    let path = store_dir
-        .cas_file_path_by_mode(digest, mode)
-        .ok_or_else(|| PnprClientError::Protocol(format!("invalid digest: {digest}")))?;
-
-    if let Ok(metadata) = std::fs::metadata(&path)
-        && metadata.len() == content.len() as u64
-    {
-        return Ok(()); // already present and complete
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, content)?;
-    set_executable(&tmp, executable)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_executable(path: &std::path::Path, executable: bool) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-    let mode = if executable { 0o755 } else { 0o644 };
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-}
-
-#[cfg(not(unix))]
-fn set_executable(_path: &std::path::Path, _executable: bool) -> std::io::Result<()> {
-    Ok(())
-}
-
-/// Write the forwarded store-index entries, skipping keys already
-/// present. Each entry's raw msgpackr-records buffer is decoded and
-/// re-queued through the writer, whose blocking drain is awaited so the
-/// rows are flushed before they're reported as written.
-async fn write_index_entries(
-    store_dir: &StoreDir,
-    entries: Vec<(String, Vec<u8>)>,
-    present: &HashSet<&str>,
-) -> usize {
-    let to_write: Vec<(String, Vec<u8>)> =
-        entries.into_iter().filter(|(key, _)| !present.contains(key.as_str())).collect();
-    if to_write.is_empty() {
-        return 0;
-    }
-
-    let (writer, writer_task) = StoreIndexWriter::spawn(store_dir);
-    let mut written = 0;
-    for (key, raw) in &to_write {
-        if let Ok(decoded) = decode_package_files_index(raw) {
-            writer.queue(key.clone(), decoded);
-            written += 1;
-        }
-    }
-    drop(writer);
-    let _ = writer_task.await;
-    written
-}
-
-fn read_store_keys(store_dir: &StoreDir) -> Vec<String> {
-    match StoreIndex::open_readonly_in(store_dir) {
-        Ok(index) => index.keys().unwrap_or_default(),
-        Err(_) => Vec::new(),
-    }
-}
-
-/// The SRI integrities already in the store, derived from the
-/// `{integrity}\t{pkgId}` index keys. Non-integrity keys (e.g. git URLs)
-/// are filtered out — sending them would just bloat the request.
-fn integrities_from_keys(keys: &[String]) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut out = Vec::new();
-    for key in keys {
-        let Some((integrity, _pkg_id)) = key.split_once('\t') else { continue };
-        if !is_integrity_like(integrity) {
-            continue;
-        }
-        if seen.insert(integrity) {
-            out.push(integrity.to_string());
-        }
-    }
-    out
-}
-
-fn is_integrity_like(value: &str) -> bool {
-    value.starts_with("sha512-") || value.starts_with("sha256-") || value.starts_with("sha1-")
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
 }
 
 #[cfg(test)]

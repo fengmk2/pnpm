@@ -18,6 +18,18 @@ export type UniversalOptions = Pick<Config, 'color' | 'dir' | 'authConfig'>
 
 export type VerifyDepsBeforeRun = 'install' | 'warn' | 'error' | 'prompt' | false
 
+export interface PackageManagerNetworkConfig {
+  ca?: string | string[]
+  cert?: string | string[]
+  configByUri: Record<string, RegistryConfig>
+  httpProxy?: string
+  httpsProxy?: string
+  key?: string
+  localAddress?: string
+  noProxy?: string | boolean
+  strictSsl?: boolean
+}
+
 /**
  * Runtime state, workspace context, and CLI metadata.
  * These fields are NOT user-facing settings — they are computed at startup
@@ -75,7 +87,8 @@ export interface Config extends OptionsFromRootManifest {
   filter: string[]
   filterProd: string[]
   authConfig: Record<string, any>, // eslint-disable-line
-  dryRun?: boolean // This option might be not supported ever
+  /** When true, `pnpm install` resolves and reports what would change but writes nothing to disk. */
+  dryRun?: boolean
   global?: boolean
   dir: string
   bin: string
@@ -164,6 +177,7 @@ export interface Config extends OptionsFromRootManifest {
   virtualStoreOnly?: boolean
   enableGlobalVirtualStore?: boolean
   verifyStoreIntegrity?: boolean
+  frozenStore?: boolean
   maxSockets?: number
   networkConcurrency?: number
   fetchingConcurrency?: number
@@ -223,9 +237,11 @@ export interface Config extends OptionsFromRootManifest {
   packGzipLevel?: number
   blockExoticSubdeps?: boolean
 
-  agent?: string
+  pnprServer?: string
 
   registries: Registries
+  packageManagerRegistries?: Registries
+  packageManagerNetworkConfig?: PackageManagerNetworkConfig
   namedRegistries?: Record<string, string>
   configByUri: Record<string, RegistryConfig>
   ignoreWorkspaceRootCheck: boolean

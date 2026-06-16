@@ -25,6 +25,12 @@
       "path": "../../building/after-install"
     },
     {
+      "path": "../../building/policy"
+    },
+    {
+      "path": "../../catalogs/config"
+    },
+    {
       "path": "../../catalogs/types"
     },
     {
@@ -67,6 +73,9 @@
       "path": "../../deps/path"
     },
     {
+      "path": "../../deps/security/signatures"
+    },
+    {
       "path": "../../deps/status"
     },
     {
@@ -82,7 +91,16 @@
       "path": "../../hooks/pnpmfile"
     },
     {
+      "path": "../../lockfile/fs"
+    },
+    {
       "path": "../../lockfile/types"
+    },
+    {
+      "path": "../../network/auth-header"
+    },
+    {
+      "path": "../../network/fetch"
     },
     {
       "path": "../../pkg-manifest/reader"
@@ -152,6 +170,9 @@
     },
     {
       "path": "../dedupe/check"
+    },
+    {
+      "path": "../dedupe/issues-renderer"
     },
     {
       "path": "../deps-installer"

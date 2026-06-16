@@ -1,5 +1,214 @@
 # @pnpm/plugin-commands-installation
 
+## 1100.9.0
+
+### Minor Changes
+
+- 61810aa: Added a new setting `frozenStore` (`--frozen-store`) that lets `pnpm install` run against a package store on a read-only filesystem (e.g. a Nix store, a read-only bind mount, an OCI layer). When enabled, pnpm opens the store's SQLite `index.db` through the `immutable=1` URI — bypassing the WAL/`-shm` sidecar creation that otherwise fails on a read-only directory — and suppresses every store-write path (the `index.db` writer and the project-registry write). Pair it with `--offline --frozen-lockfile` against a fully-populated store. Under the global virtual store, package directories live inside the store, so if the store is missing the build output of a package whose lifecycle scripts are approved (or that has a patch), pnpm fails up front with `ERR_PNPM_FROZEN_STORE_NEEDS_BUILD` rather than crashing mid-build on a read-only write — seed the store with those builds first. Incompatible with `--force` and with a configured pnpr server, since both write into the store; the side-effects cache is likewise not written under `frozenStore`. If the store is missing its content directory, the install fails fast with `ERR_PNPM_FROZEN_STORE_INCOMPLETE` rather than attempting to initialize it. The read-only `immutable=1` open requires Node.js >=22.15.0, >=23.11.0, or >=24.0.0; on older runtimes `--frozen-store` fails with a clear `ERR_PNPM_FROZEN_STORE_UNSUPPORTED_NODE` error. Bin-linking also tolerates a read-only store: under the global virtual store a package's bin source lives inside the store, so the `chmod` that makes it executable would be refused — with `EPERM`/`EACCES`, or with `EROFS` on a genuinely read-only filesystem. That `chmod` is redundant when the seed already ships its bins executable with a normalized shebang, so it is now skipped in that case, while a non-executable bin (or one still carrying a Windows CRLF shebang) on a read-only store still errors.
+- 74a2dc9: When [`pacquet`](https://github.com/pnpm/pnpm/tree/main/pacquet) (the Rust port of pnpm) is declared in `configDependencies`, pnpm now delegates dependency **resolution** to it too — not just materialization — provided the installed pacquet is new enough to support full resolving installs (>= 0.11.7).
+
+  Previously pacquet only ran in frozen-install mode: pnpm always resolved the dependency graph itself (writing `pnpm-lock.yaml`) and handed pacquet a finished lockfile to fetch / import / link. With pacquet >= 0.11.7, a non-frozen `pnpm install` (default isolated `nodeLinker`, plain install) is delegated to pacquet end-to-end in a single pass — pacquet resolves the manifests, writes the lockfile, and materializes `node_modules`. pnpm detects the capability from the installed pacquet's version; older pacquet releases keep the resolve-then-materialize split, and `add` / `update` / `remove` still resolve in pnpm (it has to mutate the manifests first). This remains an opt-in preview of the Rust install engine [#11723](https://github.com/pnpm/pnpm/issues/11723).
+
+### Patch Changes
+
+- 8dcd9a0: Fix garbled summary line after submitting `pnpm update -i` and `pnpm audit --fix -i`. The interactive checkbox prompt previously printed every selected choice's full table row (label, current/target versions, workspace, URL) joined by commas, producing a wall of text after pressing Enter. The summary now lists only the selected package names (or vulnerability keys) by setting an explicit `short` per choice; the in-progress selection UI is unchanged.
+- 86e70d2: Fixed `Cannot destructure property 'manifest' of 'manifestsByPath[rootDir]' as it is undefined` regression introduced in 11.6.0 when running `pnpm add <pkg>` outside a workspace on Windows. `selectProjectByDir` was keying the resulting `ProjectsGraph` by `opts.dir` instead of `project.rootDir`, so downstream `manifestsByPath` lookups missed when the two paths normalized differently (typically drive-letter casing). [pnpm/pnpm#12379](https://github.com/pnpm/pnpm/issues/12379)
+- ab0b7d1: Added support for the `--trust-lockfile` flag on `pnpm link`
+- d50d691: Close lockfile reads deterministically before rewriting lockfiles and keep pacquet's virtual store directory length aligned with pnpm on Windows.
+- a31faa7: Updated dependency ranges. Notably:
+
+  - `@pnpm/logger` peer dependency range moved to `^1100.0.0`.
+  - `msgpackr` 1.11.8 → 2.0.4 (store index files remain byte-compatible in both directions).
+  - `open` ^7.4.2 → ^11.0.0, `memoize` ^10 → ^11, `cli-truncate` ^5 → ^6, `pidtree` ^0.6 → ^1.
+  - `@yarnpkg/core` 4.5.0 → 4.8.0, `@rushstack/worker-pool` 0.7.7 → 0.7.18, `@cyclonedx/cyclonedx-library` 10.0.0 → 10.1.0, `@pnpm/config.nerf-dart` ^1 → ^2, `@pnpm/log.group` 3.0.2 → 4.0.1, `@pnpm/util.lex-comparator` ^3 → ^4.
+
+- Updated dependencies [f648e9b]
+- Updated dependencies [61810aa]
+- Updated dependencies [74a2dc9]
+- Updated dependencies [c16eb0a]
+- Updated dependencies [681b593]
+- Updated dependencies [d50d691]
+- Updated dependencies [1310ab5]
+- Updated dependencies [a31faa7]
+  - @pnpm/installing.deps-installer@1102.0.0
+  - @pnpm/config.reader@1101.9.0
+  - @pnpm/store.controller@1102.0.0
+  - @pnpm/store.connection-manager@1100.3.0
+  - @pnpm/building.after-install@1102.0.0
+  - @pnpm/resolving.npm-resolver@1102.0.0
+  - @pnpm/installing.context@1100.0.18
+  - @pnpm/network.auth-header@1101.1.2
+  - @pnpm/types@1101.3.2
+  - @pnpm/lockfile.fs@1100.1.5
+  - @pnpm/cli.utils@1101.0.12
+  - @pnpm/deps.inspection.outdated@1100.1.8
+  - @pnpm/deps.path@1100.0.8
+  - @pnpm/deps.security.signatures@1101.2.2
+  - @pnpm/deps.status@1100.1.1
+  - @pnpm/global.commands@1100.0.28
+  - @pnpm/hooks.pnpmfile@1100.0.15
+  - @pnpm/installing.env-installer@1102.0.0
+  - @pnpm/network.fetch@1100.1.3
+  - @pnpm/pkg-manifest.utils@1100.2.5
+  - @pnpm/workspace.project-manifest-reader@1100.0.13
+  - @pnpm/workspace.projects-reader@1101.0.12
+  - @pnpm/workspace.state@1100.0.22
+  - @pnpm/workspace.workspace-manifest-writer@1100.0.13
+  - @pnpm/workspace.projects-graph@1100.0.18
+  - @pnpm/building.policy@1100.0.10
+  - @pnpm/config.pick-registry-for-package@1100.0.9
+  - @pnpm/config.writer@1100.0.13
+  - @pnpm/installing.dedupe.check@1100.0.11
+  - @pnpm/lockfile.types@1100.0.11
+  - @pnpm/pkg-manifest.reader@1100.0.8
+  - @pnpm/resolving.resolver-base@1100.4.2
+  - @pnpm/workspace.project-manifest-writer@1100.0.8
+  - @pnpm/workspace.projects-filter@1100.0.21
+  - @pnpm/workspace.projects-sorter@1100.0.7
+
+## 1100.8.0
+
+### Minor Changes
+
+- d976edf: `pnpm install` completes without re-resolving when `pnpm-lock.yaml` was deleted but `node_modules` is intact: the up-to-date check now treats the current lockfile (`node_modules/.pnpm/lock.yaml`) — the record of what the previous install materialized — as the wanted lockfile, verifies the manifests still match it, restores `pnpm-lock.yaml` from it, and reports "Already up to date". Previously this scenario triggered a full resolution and a re-verification of every locked package against the registry.
+
+### Patch Changes
+
+- Updated dependencies [bc9ed78]
+- Updated dependencies [d976edf]
+- Updated dependencies [f11b4fc]
+- Updated dependencies [615c669]
+- Updated dependencies [84bb4b1]
+  - @pnpm/config.reader@1101.8.0
+  - @pnpm/deps.status@1100.1.0
+  - @pnpm/installing.deps-installer@1101.9.0
+  - @pnpm/building.after-install@1101.0.21
+  - @pnpm/global.commands@1100.0.27
+  - @pnpm/store.connection-manager@1100.2.8
+  - @pnpm/workspace.state@1100.0.21
+  - @pnpm/hooks.pnpmfile@1100.0.14
+  - @pnpm/installing.context@1100.0.17
+  - @pnpm/installing.env-installer@1101.1.8
+  - @pnpm/network.fetch@1100.1.2
+  - @pnpm/pkg-manifest.utils@1100.2.4
+  - @pnpm/resolving.npm-resolver@1101.5.2
+  - @pnpm/store.controller@1101.0.13
+  - @pnpm/cli.utils@1101.0.11
+  - @pnpm/deps.security.signatures@1101.2.1
+  - @pnpm/deps.inspection.outdated@1100.1.7
+  - @pnpm/workspace.project-manifest-reader@1100.0.12
+  - @pnpm/workspace.projects-graph@1100.0.17
+  - @pnpm/workspace.projects-reader@1101.0.11
+  - @pnpm/workspace.projects-filter@1100.0.20
+  - @pnpm/workspace.workspace-manifest-writer@1100.0.12
+
+## 1100.7.3
+
+### Patch Changes
+
+- 5f2bb9f: Security: pnpm now verifies the npm registry signature of a package-manager binary before spawning it, so a cloned repository cannot make pnpm download and execute an arbitrary native binary.
+
+  This covers two paths that select an executable from repository-controlled input:
+
+  - **pacquet install engine** — declaring `pacquet` (or `@pnpm/pacquet`) in `configDependencies` opts in to pnpm's Rust install engine. pnpm now verifies that the installed `pacquet` shim and the host's `@pacquet/<platform>-<arch>` binary carry a valid npm registry signature for their exact `name@version`, and refuses to run pacquet (failing the command) if the signature does not verify or cannot be checked. The only graceful fallback to pnpm's own engine is when pacquet has no binary for the current platform.
+  - **automatic version switch / `self-update`** — the `packageManager` / `devEngines.packageManager` field makes pnpm download and run a specific pnpm version. pnpm now verifies the registry signature of `pnpm`, `@pnpm/exe`, and the host platform binary before installing/spawning them, and refuses to run an engine whose signature does not match a published, signed release. The check runs only on an actual download (store cache miss), so it does not add a network round trip to every command.
+
+  In both cases the signature is verified over the _installed_ integrity, against npm's public signing keys that ship embedded in the pnpm CLI (like corepack), so bytes substituted via a tampered lockfile or a repository-controlled registry fail verification — and a registry the user did not vouch for cannot supply its own signing keys. The signed packument is fetched from the configured registry, so an npm mirror works transparently. Verification fails closed: if it cannot be completed (for example, the registry is unreachable), the command fails rather than running an unverified binary. The embedded keys are kept current by a release-time check against npm's signing-keys endpoint.
+
+- e4d2fe0: Clarified in CLI help that the pnpm store is trusted shared state and store integrity checks are corruption detection, not a tamper boundary for untrusted store writers.
+- Updated dependencies [822beb5]
+- Updated dependencies [3537020]
+- Updated dependencies [894ea6a]
+- Updated dependencies [6b5d91a]
+- Updated dependencies [027196b]
+- Updated dependencies [97e1982]
+- Updated dependencies [5f2bb9f]
+- Updated dependencies [089484a]
+- Updated dependencies [1017c36]
+- Updated dependencies [e4d2fe0]
+- Updated dependencies [bf1b731]
+  - @pnpm/config.reader@1101.7.0
+  - @pnpm/workspace.state@1100.0.20
+  - @pnpm/deps.status@1100.0.23
+  - @pnpm/deps.security.signatures@1101.2.0
+  - @pnpm/installing.deps-installer@1101.8.0
+  - @pnpm/cli.common-cli-options-help@1100.0.2
+  - @pnpm/building.after-install@1101.0.20
+  - @pnpm/building.policy@1100.0.9
+  - @pnpm/types@1101.3.1
+  - @pnpm/global.commands@1100.0.26
+  - @pnpm/store.connection-manager@1100.2.7
+  - @pnpm/installing.env-installer@1101.1.7
+  - @pnpm/cli.utils@1101.0.10
+  - @pnpm/config.pick-registry-for-package@1100.0.8
+  - @pnpm/config.writer@1100.0.12
+  - @pnpm/deps.inspection.outdated@1100.1.6
+  - @pnpm/deps.path@1100.0.7
+  - @pnpm/hooks.pnpmfile@1100.0.13
+  - @pnpm/installing.context@1100.0.16
+  - @pnpm/installing.dedupe.check@1100.0.10
+  - @pnpm/lockfile.fs@1100.1.4
+  - @pnpm/lockfile.types@1100.0.10
+  - @pnpm/network.auth-header@1101.1.1
+  - @pnpm/network.fetch@1100.1.1
+  - @pnpm/pkg-manifest.reader@1100.0.7
+  - @pnpm/pkg-manifest.utils@1100.2.3
+  - @pnpm/resolving.npm-resolver@1101.5.1
+  - @pnpm/resolving.resolver-base@1100.4.1
+  - @pnpm/store.controller@1101.0.12
+  - @pnpm/workspace.project-manifest-reader@1100.0.11
+  - @pnpm/workspace.project-manifest-writer@1100.0.7
+  - @pnpm/workspace.projects-filter@1100.0.19
+  - @pnpm/workspace.projects-graph@1100.0.16
+  - @pnpm/workspace.projects-reader@1101.0.10
+  - @pnpm/workspace.projects-sorter@1100.0.6
+  - @pnpm/workspace.workspace-manifest-writer@1100.0.12
+
+## 1100.7.2
+
+### Patch Changes
+
+- a017bf3: Renamed the experimental `agent` setting to `pnprServer` so the pnpm CLI matches the same setting name pacquet uses for offloading resolution to a [pnpr](https://github.com/pnpm/pnpm/tree/main/pnpr) server. Point pnpm at a pnpr server with `pnprServer: <url>` in `pnpm-workspace.yaml` (or `--pnpr-server <url>`); the previous `agent` / `--agent` name no longer works. The client package was likewise renamed from `@pnpm/agent.client` to `@pnpm/pnpr.client`.
+- Updated dependencies [e7e99f0]
+- Updated dependencies [4e740d5]
+- Updated dependencies [5192edf]
+- Updated dependencies [a017bf3]
+- Updated dependencies [f429f93]
+- Updated dependencies [a017bf3]
+- Updated dependencies [a358ee0]
+- Updated dependencies [722b9cd]
+- Updated dependencies [6d17b66]
+  - @pnpm/installing.deps-installer@1101.7.0
+  - @pnpm/building.after-install@1101.0.19
+  - @pnpm/config.reader@1101.6.0
+  - @pnpm/types@1101.3.0
+  - @pnpm/resolving.npm-resolver@1101.5.0
+  - @pnpm/resolving.resolver-base@1100.4.0
+  - @pnpm/global.commands@1100.0.25
+  - @pnpm/installing.env-installer@1101.1.6
+  - @pnpm/deps.status@1100.0.22
+  - @pnpm/store.connection-manager@1100.2.6
+  - @pnpm/workspace.state@1100.0.19
+  - @pnpm/cli.utils@1101.0.9
+  - @pnpm/config.pick-registry-for-package@1100.0.7
+  - @pnpm/config.writer@1100.0.11
+  - @pnpm/deps.inspection.outdated@1100.1.5
+  - @pnpm/deps.path@1100.0.6
+  - @pnpm/hooks.pnpmfile@1100.0.12
+  - @pnpm/installing.context@1100.0.15
+  - @pnpm/installing.dedupe.check@1100.0.9
+  - @pnpm/lockfile.types@1100.0.9
+  - @pnpm/pkg-manifest.reader@1100.0.6
+  - @pnpm/pkg-manifest.utils@1100.2.2
+  - @pnpm/store.controller@1101.0.11
+  - @pnpm/workspace.project-manifest-reader@1100.0.10
+  - @pnpm/workspace.project-manifest-writer@1100.0.6
+  - @pnpm/workspace.projects-filter@1100.0.18
+  - @pnpm/workspace.projects-graph@1100.0.15
+  - @pnpm/workspace.projects-reader@1101.0.9
+  - @pnpm/workspace.projects-sorter@1100.0.5
+  - @pnpm/workspace.workspace-manifest-writer@1100.0.11
+
 ## 1100.7.1
 
 ### Patch Changes

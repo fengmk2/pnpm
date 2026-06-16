@@ -1,5 +1,114 @@
 # @pnpm/config.deps-installer
 
+## 1102.0.0
+
+### Patch Changes
+
+- a31faa7: Updated dependency ranges. Notably:
+
+  - `@pnpm/logger` peer dependency range moved to `^1100.0.0`.
+  - `msgpackr` 1.11.8 → 2.0.4 (store index files remain byte-compatible in both directions).
+  - `open` ^7.4.2 → ^11.0.0, `memoize` ^10 → ^11, `cli-truncate` ^5 → ^6, `pidtree` ^0.6 → ^1.
+  - `@yarnpkg/core` 4.5.0 → 4.8.0, `@rushstack/worker-pool` 0.7.7 → 0.7.18, `@cyclonedx/cyclonedx-library` 10.0.0 → 10.1.0, `@pnpm/config.nerf-dart` ^1 → ^2, `@pnpm/log.group` 3.0.2 → 4.0.1, `@pnpm/util.lex-comparator` ^3 → ^4.
+
+- Updated dependencies [f648e9b]
+- Updated dependencies [9b35a60]
+- Updated dependencies [61810aa]
+- Updated dependencies [f20ad8f]
+- Updated dependencies [3a27141]
+- Updated dependencies [681b593]
+- Updated dependencies [d50d691]
+- Updated dependencies [1310ab5]
+- Updated dependencies [a31faa7]
+  - @pnpm/installing.deps-resolver@1100.2.3
+  - @pnpm/store.controller@1102.0.0
+  - @pnpm/resolving.npm-resolver@1102.0.0
+  - @pnpm/worker@1100.2.0
+  - @pnpm/lockfile.utils@1100.0.13
+  - @pnpm/network.auth-header@1101.1.2
+  - @pnpm/types@1101.3.2
+  - @pnpm/lockfile.fs@1100.1.5
+  - @pnpm/config.package-is-installable@1100.0.11
+  - @pnpm/core-loggers@1100.2.1
+  - @pnpm/network.fetch@1100.1.3
+  - @pnpm/deps.graph-hasher@1100.2.5
+  - @pnpm/config.pick-registry-for-package@1100.0.9
+  - @pnpm/config.writer@1100.0.13
+  - @pnpm/lockfile.pruner@1100.0.11
+  - @pnpm/lockfile.types@1100.0.11
+  - @pnpm/pkg-manifest.reader@1100.0.8
+  - @pnpm/store.controller-types@1100.1.5
+
+## 1101.1.8
+
+### Patch Changes
+
+- Updated dependencies [f11b4fc]
+- Updated dependencies [52be454]
+  - @pnpm/core-loggers@1100.2.0
+  - @pnpm/config.package-is-installable@1100.0.10
+  - @pnpm/installing.deps-resolver@1100.2.2
+  - @pnpm/network.fetch@1100.1.2
+  - @pnpm/resolving.npm-resolver@1101.5.2
+  - @pnpm/store.controller@1101.0.13
+  - @pnpm/worker@1100.1.11
+
+## 1101.1.7
+
+### Patch Changes
+
+- Updated dependencies [089484a]
+- Updated dependencies [29a496a]
+- Updated dependencies [bf1b731]
+  - @pnpm/worker@1100.1.10
+  - @pnpm/installing.deps-resolver@1100.2.1
+  - @pnpm/deps.graph-hasher@1100.2.4
+  - @pnpm/types@1101.3.1
+  - @pnpm/config.package-is-installable@1100.0.9
+  - @pnpm/config.pick-registry-for-package@1100.0.8
+  - @pnpm/config.writer@1100.0.12
+  - @pnpm/core-loggers@1100.1.4
+  - @pnpm/lockfile.fs@1100.1.4
+  - @pnpm/lockfile.pruner@1100.0.10
+  - @pnpm/lockfile.types@1100.0.10
+  - @pnpm/lockfile.utils@1100.0.12
+  - @pnpm/network.auth-header@1101.1.1
+  - @pnpm/network.fetch@1100.1.1
+  - @pnpm/pkg-manifest.reader@1100.0.7
+  - @pnpm/resolving.npm-resolver@1101.5.1
+  - @pnpm/store.controller@1101.0.12
+  - @pnpm/store.controller-types@1100.1.4
+
+## 1101.1.6
+
+### Patch Changes
+
+- Updated dependencies [60a1eec]
+- Updated dependencies [5192edf]
+- Updated dependencies [3b76b8e]
+- Updated dependencies [1c73e83]
+- Updated dependencies [a017bf3]
+- Updated dependencies [722b9cd]
+- Updated dependencies [6d17b66]
+  - @pnpm/network.fetch@1100.1.0
+  - @pnpm/network.auth-header@1101.1.0
+  - @pnpm/worker@1100.1.9
+  - @pnpm/installing.deps-resolver@1100.2.0
+  - @pnpm/types@1101.3.0
+  - @pnpm/resolving.npm-resolver@1101.5.0
+  - @pnpm/config.package-is-installable@1100.0.8
+  - @pnpm/config.pick-registry-for-package@1100.0.7
+  - @pnpm/config.writer@1100.0.11
+  - @pnpm/core-loggers@1100.1.3
+  - @pnpm/deps.graph-hasher@1100.2.3
+  - @pnpm/lockfile.fs@1100.1.3
+  - @pnpm/lockfile.pruner@1100.0.9
+  - @pnpm/lockfile.types@1100.0.9
+  - @pnpm/lockfile.utils@1100.0.11
+  - @pnpm/pkg-manifest.reader@1100.0.6
+  - @pnpm/store.controller@1101.0.11
+  - @pnpm/store.controller-types@1100.1.3
+
 ## 1101.1.5
 
 ### Patch Changes

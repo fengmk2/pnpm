@@ -1,5 +1,50 @@
 # @pnpm/create-cafs-store
 
+## 1100.0.14
+
+### Patch Changes
+
+- a31faa7: Updated dependency ranges. Notably:
+
+  - `@pnpm/logger` peer dependency range moved to `^1100.0.0`.
+  - `msgpackr` 1.11.8 → 2.0.4 (store index files remain byte-compatible in both directions).
+  - `open` ^7.4.2 → ^11.0.0, `memoize` ^10 → ^11, `cli-truncate` ^5 → ^6, `pidtree` ^0.6 → ^1.
+  - `@yarnpkg/core` 4.5.0 → 4.8.0, `@rushstack/worker-pool` 0.7.7 → 0.7.18, `@cyclonedx/cyclonedx-library` 10.0.0 → 10.1.0, `@pnpm/config.nerf-dart` ^1 → ^2, `@pnpm/log.group` 3.0.2 → 4.0.1, `@pnpm/util.lex-comparator` ^3 → ^4.
+
+- Updated dependencies [a31faa7]
+  - @pnpm/fs.indexed-pkg-importer@1100.0.14
+  - @pnpm/store.cafs@1100.1.10
+  - @pnpm/building.pkg-requires-build@1100.0.8
+  - @pnpm/fetching.fetcher-base@1100.1.9
+  - @pnpm/store.controller-types@1100.1.5
+
+## 1100.0.13
+
+### Patch Changes
+
+- @pnpm/fs.indexed-pkg-importer@1100.0.13
+
+## 1100.0.12
+
+### Patch Changes
+
+- @pnpm/building.pkg-requires-build@1100.0.7
+- @pnpm/fetching.fetcher-base@1100.1.8
+- @pnpm/store.cafs@1100.1.9
+- @pnpm/store.controller-types@1100.1.4
+- @pnpm/fs.indexed-pkg-importer@1100.0.12
+
+## 1100.0.11
+
+### Patch Changes
+
+- Updated dependencies [cbfeeef]
+  - @pnpm/fs.indexed-pkg-importer@1100.0.11
+  - @pnpm/building.pkg-requires-build@1100.0.6
+  - @pnpm/fetching.fetcher-base@1100.1.7
+  - @pnpm/store.cafs@1100.1.8
+  - @pnpm/store.controller-types@1100.1.3
+
 ## 1100.0.10
 
 ### Patch Changes

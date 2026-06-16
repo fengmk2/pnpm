@@ -86,6 +86,9 @@ pub struct NamedRegistryResolver<Cache: PackageMetaCache> {
     /// [`PickPackageContext::full_metadata`]. Mirrors upstream's
     /// [`ctx.fullMetadata`](https://github.com/pnpm/pnpm/blob/2a9bd897bf/resolving/npm-resolver/src/pickPackage.ts#L175).
     pub full_metadata: bool,
+    /// When full metadata is forced, read and write pnpm's filtered
+    /// full-metadata mirror.
+    pub filter_metadata: bool,
     /// Retry budget threaded through to
     /// [`PickPackageContext::retry_opts`]. Same `fetch-retries`-sourced
     /// budget the sibling [`crate::NpmResolver`] uses.
@@ -141,9 +144,8 @@ impl<Cache: PackageMetaCache + 'static> NamedRegistryResolver<Cache> {
         };
 
         let optional = wanted_dependency.optional.unwrap_or(false);
-        let picked = match self.pick_from_registry(registry, &spec, opts, optional).await? {
-            Some(picked) => picked,
-            None => return Ok(None),
+        let Some(picked) = self.pick_from_registry(registry, &spec, opts, optional).await? else {
+            return Ok(None);
         };
 
         // Mirror upstream: the dependency is recorded under the
@@ -200,9 +202,13 @@ impl<Cache: PackageMetaCache + 'static> NamedRegistryResolver<Cache> {
         opts: &ResolveOptions,
         optional: bool,
     ) -> Result<Option<PickedFromRegistry>, ResolveError> {
+        let overlay_selectors =
+            crate::preferred_overlay::overlay_merged_selectors(opts, &spec.name);
         let pick_opts = PickPackageOptions {
             registry,
-            preferred_version_selectors: opts.preferred_versions.get(&spec.name),
+            preferred_version_selectors: overlay_selectors
+                .as_ref()
+                .or_else(|| opts.preferred_versions.get(&spec.name)),
             published_by: opts.published_by,
             published_by_exclude: opts.published_by_exclude.as_ref(),
             pick_lowest_version: opts.pick_lowest_version,
@@ -222,6 +228,7 @@ impl<Cache: PackageMetaCache + 'static> NamedRegistryResolver<Cache> {
             prefer_offline: self.prefer_offline,
             ignore_missing_time_field: self.ignore_missing_time_field,
             full_metadata: self.full_metadata,
+            filter_metadata: self.filter_metadata,
             retry_opts: self.retry_opts,
         };
 

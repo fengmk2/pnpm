@@ -55,7 +55,7 @@ pub async fn fetch_attestation_published_at(
     let registry = opts.registry.trim_end_matches('/');
     let url = format!("{registry}/-/npm/v1/attestations/{pkg_name}@{version}");
     let mut request = opts.http_client.acquire_for_url(&url).await.get(&url);
-    if let Some(value) = opts.auth_headers.for_url(&url) {
+    if let Some(value) = opts.auth_headers.for_url_with_package(&url, Some(pkg_name)) {
         request = request.header("authorization", value);
     }
     let response = match request.send().await {
@@ -95,10 +95,7 @@ fn extract_published_at(body: &serde_json::Value) -> Option<String> {
     let attestations = body.get("attestations")?.as_array()?;
     let mut earliest: Option<i64> = None;
     for attestation in attestations {
-        let seconds = match read_earliest_integrated_time(attestation) {
-            Some(seconds) => seconds,
-            None => continue,
-        };
+        let Some(seconds) = read_earliest_integrated_time(attestation) else { continue };
         earliest = Some(earliest.map_or(seconds, |current| current.min(seconds)));
     }
     let seconds = earliest?;
